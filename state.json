@@ -12,7 +12,12 @@
       "stop_percent": 1.0,
       "take_profit_percent": 3.0,
       "stop_price": 541.2691,
-      "target_price": 519.8326999999999
+      "target_price": 519.8326999999999,
+      "original_stop_price": 541.2691,
+      "highest_price": 535.91,
+      "lowest_price": 535.91,
+      "trailing_active": false,
+      "trailing_stop_price": 0.0
     },
     "BNBUSDT": {
       "symbol": "BNBUSDT",
@@ -25,7 +30,12 @@
       "stop_percent": 1.0,
       "take_profit_percent": 3.0,
       "stop_price": 575.4071,
-      "target_price": 552.6187
+      "target_price": 552.6187,
+      "original_stop_price": 575.4071,
+      "highest_price": 569.71,
+      "lowest_price": 569.71,
+      "trailing_active": false,
+      "trailing_stop_price": 0.0
     },
     "DOGEUSDT": {
       "symbol": "DOGEUSDT",
@@ -38,8 +48,13 @@
       "stop_percent": 1.0,
       "take_profit_percent": 3.0,
       "stop_price": 0.07231599999999999,
-      "target_price": 0.069452
+      "target_price": 0.069452,
+      "original_stop_price": 0.07231599999999999,
+      "highest_price": 0.0716,
+      "lowest_price": 0.0716,
+      "trailing_active": false,
+      "trailing_stop_price": 0.0
     }
   },
-  "saved_at": "2026-07-17T18:42:51.862625"
+  "saved_at": "2026-07-17T19:01:18.515149"
 }

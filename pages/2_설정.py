@@ -26,6 +26,10 @@ DEFAULT_SETTINGS = {
     "minimum_take_profit_percent": 1.5,
     "maximum_take_profit_percent": 6.0,
 
+    "trailing_stop_enabled": True,
+    "trailing_activation_percent": 1.0,
+    "trailing_distance_percent": 0.5,
+
     "scan_interval_seconds": 60,
     "minimum_entry_score": 45,
     "round_trip_fee_percent": 0.10,
@@ -91,7 +95,9 @@ def main():
         layout="wide",
     )
 
-    st.title("⚙️ BinanceBot 설정")
+    st.title(
+        "⚙️ BinanceBot 설정"
+    )
 
     settings = load_settings()
 
@@ -196,11 +202,11 @@ def main():
         st.divider()
 
         st.subheader(
-            "손절·익절 방식"
+            "기본 손절·익절"
         )
 
         exit_mode = st.radio(
-            "청산 방식 선택",
+            "청산 방식",
             options=[
                 "FIXED",
                 "ATR",
@@ -222,8 +228,8 @@ def main():
 
         fixed_tab, atr_tab = st.tabs(
             [
-                "고정 방식 설정",
-                "ATR 방식 설정",
+                "고정 방식",
+                "ATR 방식",
             ]
         )
 
@@ -356,10 +362,69 @@ def main():
         st.divider()
 
         st.subheader(
+            "트레일링 스톱"
+        )
+
+        trailing_stop_enabled = (
+            st.checkbox(
+                "트레일링 스톱 사용",
+                value=bool(
+                    settings[
+                        "trailing_stop_enabled"
+                    ]
+                ),
+            )
+        )
+
+        first, second = (
+            st.columns(2)
+        )
+
+        with first:
+            trailing_activation_percent = (
+                st.number_input(
+                    "트레일링 시작 수익률(%)",
+                    min_value=0.1,
+                    max_value=50.0,
+                    value=float(
+                        settings[
+                            "trailing_activation_percent"
+                        ]
+                    ),
+                    step=0.1,
+                )
+            )
+
+        with second:
+            trailing_distance_percent = (
+                st.number_input(
+                    "최고·최저가 추적 거리(%)",
+                    min_value=0.1,
+                    max_value=20.0,
+                    value=float(
+                        settings[
+                            "trailing_distance_percent"
+                        ]
+                    ),
+                    step=0.1,
+                )
+            )
+
+        st.info(
+            "예: 수익률 +1%에서 활성화, "
+            "추적 거리 0.5%라면 최고가에서 "
+            "0.5% 하락할 때 포지션을 청산합니다."
+        )
+
+        st.divider()
+
+        st.subheader(
             "일일 거래 제한"
         )
 
-        first, second = st.columns(2)
+        first, second = (
+            st.columns(2)
+        )
 
         with first:
             daily_stop_loss_percent = (
@@ -467,6 +532,18 @@ def main():
 
             "maximum_take_profit_percent": float(
                 maximum_take_profit_percent
+            ),
+
+            "trailing_stop_enabled": bool(
+                trailing_stop_enabled
+            ),
+
+            "trailing_activation_percent": float(
+                trailing_activation_percent
+            ),
+
+            "trailing_distance_percent": float(
+                trailing_distance_percent
             ),
 
             "scan_interval_seconds": int(

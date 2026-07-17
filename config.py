@@ -2,7 +2,7 @@ import json
 import os
 
 
-BOT_NAME = "BinanceBot v2.3"
+BOT_NAME = "BinanceBot v2.4"
 SETTINGS_FILE = "settings.json"
 
 
@@ -13,7 +13,6 @@ DEFAULT_SETTINGS = {
     "max_positions": 3,
 
     # 손절·익절 방식
-    # FIXED 또는 ATR
     "exit_mode": "FIXED",
 
     # 고정 손절·익절
@@ -24,11 +23,16 @@ DEFAULT_SETTINGS = {
     "atr_stop_multiplier": 2.0,
     "atr_take_profit_multiplier": 6.0,
 
-    # ATR 방식에서 허용할 최소·최대 폭
     "minimum_stop_percent": 0.5,
     "maximum_stop_percent": 2.0,
+
     "minimum_take_profit_percent": 1.5,
     "maximum_take_profit_percent": 6.0,
+
+    # 트레일링 스톱
+    "trailing_stop_enabled": True,
+    "trailing_activation_percent": 1.0,
+    "trailing_distance_percent": 0.5,
 
     # 거래 설정
     "scan_interval_seconds": 60,
@@ -133,6 +137,7 @@ MAXIMUM_STOP_PERCENT = float(
     SETTINGS["maximum_stop_percent"]
 )
 
+
 MINIMUM_TAKE_PROFIT_PERCENT = float(
     SETTINGS[
         "minimum_take_profit_percent"
@@ -142,6 +147,27 @@ MINIMUM_TAKE_PROFIT_PERCENT = float(
 MAXIMUM_TAKE_PROFIT_PERCENT = float(
     SETTINGS[
         "maximum_take_profit_percent"
+    ]
+)
+
+
+# ==================================================
+# 트레일링 스톱
+# ==================================================
+
+TRAILING_STOP_ENABLED = bool(
+    SETTINGS["trailing_stop_enabled"]
+)
+
+TRAILING_ACTIVATION_PERCENT = float(
+    SETTINGS[
+        "trailing_activation_percent"
+    ]
+)
+
+TRAILING_DISTANCE_PERCENT = float(
+    SETTINGS[
+        "trailing_distance_percent"
     ]
 )
 
@@ -189,9 +215,9 @@ PAPER_TRADING = True
 
 def print_loaded_settings():
     print()
-    print("=" * 65)
+    print("=" * 70)
     print("BinanceBot 설정")
-    print("=" * 65)
+    print("=" * 70)
 
     print(
         f"청산 방식: {EXIT_MODE}"
@@ -202,6 +228,7 @@ def print_loaded_settings():
             f"고정 손절: "
             f"-{STOP_LOSS_PERCENT}%"
         )
+
         print(
             f"고정 익절: "
             f"+{TAKE_PROFIT_PERCENT}%"
@@ -212,21 +239,34 @@ def print_loaded_settings():
             f"ATR 손절 배수: "
             f"{ATR_STOP_MULTIPLIER}"
         )
+
         print(
             f"ATR 익절 배수: "
             f"{ATR_TAKE_PROFIT_MULTIPLIER}"
         )
-        print(
-            f"손절 허용 범위: "
-            f"{MINIMUM_STOP_PERCENT}%"
-            f" ~ {MAXIMUM_STOP_PERCENT}%"
+
+    print()
+    print(
+        "트레일링 스톱: "
+        + (
+            "활성화"
+            if TRAILING_STOP_ENABLED
+            else "비활성화"
         )
+    )
+
+    if TRAILING_STOP_ENABLED:
         print(
-            f"익절 허용 범위: "
-            f"{MINIMUM_TAKE_PROFIT_PERCENT}%"
-            f" ~ {MAXIMUM_TAKE_PROFIT_PERCENT}%"
+            f"트레일링 시작 수익률: "
+            f"+{TRAILING_ACTIVATION_PERCENT}%"
         )
 
+        print(
+            f"최고·최저가 추적 거리: "
+            f"{TRAILING_DISTANCE_PERCENT}%"
+        )
+
+    print()
     print(
         f"최대 포지션: "
         f"{MAX_POSITIONS}개"
@@ -247,7 +287,7 @@ def print_loaded_settings():
         f"{SCAN_INTERVAL_SECONDS}초"
     )
 
-    print("=" * 65)
+    print("=" * 70)
 
 
 if __name__ == "__main__":

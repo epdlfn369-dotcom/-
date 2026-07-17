@@ -109,8 +109,7 @@ def calculate_exit_prices(
             entry_price
             * (
                 1
-                + take_profit_percent
-                / 100
+                + take_profit_percent / 100
             )
         )
 
@@ -127,8 +126,7 @@ def calculate_exit_prices(
             entry_price
             * (
                 1
-                - take_profit_percent
-                / 100
+                - take_profit_percent / 100
             )
         )
 
@@ -191,24 +189,14 @@ def calculate_net_profit_percent(
 
 
 # ==================================================
-# 기존 포지션 호환
+# 기존 저장 포지션 호환
 # ==================================================
 
-def ensure_exit_data(
+def ensure_position_data(
     symbol,
     position_data,
 ):
-    required_keys = {
-        "stop_price",
-        "target_price",
-        "stop_percent",
-        "take_profit_percent",
-    }
-
-    if required_keys.issubset(
-        position_data.keys()
-    ):
-        return False
+    changed = False
 
     entry_price = float(
         position_data["entry_price"]
@@ -216,42 +204,251 @@ def ensure_exit_data(
 
     side = position_data["side"]
 
-    # 예전 포지션에는 ATR 값이 없으므로
-    # 고정 손절·익절을 사용
-    stop_percent = (
-        config.STOP_LOSS_PERCENT
-    )
+    if "stop_percent" not in position_data:
+        position_data[
+            "stop_percent"
+        ] = config.STOP_LOSS_PERCENT
 
-    take_profit_percent = (
-        config.TAKE_PROFIT_PERCENT
-    )
+        changed = True
 
-    stop_price, target_price = (
-        calculate_exit_prices(
-            side=side,
-            entry_price=entry_price,
-            stop_percent=stop_percent,
-            take_profit_percent=(
-                take_profit_percent
-            ),
+    if (
+        "take_profit_percent"
+        not in position_data
+    ):
+        position_data[
+            "take_profit_percent"
+        ] = config.TAKE_PROFIT_PERCENT
+
+        changed = True
+
+    if (
+        "stop_price"
+        not in position_data
+        or "target_price"
+        not in position_data
+    ):
+        stop_price, target_price = (
+            calculate_exit_prices(
+                side=side,
+                entry_price=entry_price,
+                stop_percent=float(
+                    position_data[
+                        "stop_percent"
+                    ]
+                ),
+                take_profit_percent=float(
+                    position_data[
+                        "take_profit_percent"
+                    ]
+                ),
+            )
+        )
+
+        position_data[
+            "stop_price"
+        ] = stop_price
+
+        position_data[
+            "target_price"
+        ] = target_price
+
+        changed = True
+
+    if "original_stop_price" not in position_data:
+        position_data[
+            "original_stop_price"
+        ] = float(
+            position_data["stop_price"]
+        )
+
+        changed = True
+
+    if "highest_price" not in position_data:
+        position_data[
+            "highest_price"
+        ] = entry_price
+
+        changed = True
+
+    if "lowest_price" not in position_data:
+        position_data[
+            "lowest_price"
+        ] = entry_price
+
+        changed = True
+
+    if "trailing_active" not in position_data:
+        position_data[
+            "trailing_active"
+        ] = False
+
+        changed = True
+
+    if "trailing_stop_price" not in position_data:
+        position_data[
+            "trailing_stop_price"
+        ] = 0.0
+
+        changed = True
+
+    if changed:
+        positions[symbol] = position_data
+
+    return changed
+
+
+# ==================================================
+# 트레일링 스톱
+# ==================================================
+
+def update_trailing_stop(
+    position_data,
+    current_price,
+):
+    if not config.TRAILING_STOP_ENABLED:
+        return False
+
+    side = position_data["side"]
+
+    gross_percent = (
+        calculate_gross_profit_percent(
+            position_data,
+            current_price,
         )
     )
 
-    position_data.update(
-        {
-            "exit_mode": "FIXED_LEGACY",
-            "stop_percent": stop_percent,
-            "take_profit_percent": (
-                take_profit_percent
-            ),
-            "stop_price": stop_price,
-            "target_price": target_price,
-        }
+    changed = False
+
+    # 트레일링 활성화 전
+    if not position_data[
+        "trailing_active"
+    ]:
+        if (
+            gross_percent
+            < config.TRAILING_ACTIVATION_PERCENT
+        ):
+            return False
+
+        position_data[
+            "trailing_active"
+        ] = True
+
+        print(
+            f"🔥 {position_data['symbol']} "
+            f"트레일링 스톱 활성화 "
+            f"(수익률 {gross_percent:+.3f}%)"
+        )
+
+        changed = True
+
+    distance = (
+        config.TRAILING_DISTANCE_PERCENT
+        / 100
     )
 
-    positions[symbol] = position_data
+    if side == "LONG":
+        previous_highest = float(
+            position_data[
+                "highest_price"
+            ]
+        )
 
-    return True
+        new_highest = max(
+            previous_highest,
+            current_price,
+        )
+
+        if new_highest != previous_highest:
+            position_data[
+                "highest_price"
+            ] = new_highest
+
+            changed = True
+
+        trailing_stop_price = (
+            new_highest
+            * (1 - distance)
+        )
+
+        current_stop_price = float(
+            position_data["stop_price"]
+        )
+
+        # 롱은 손절선이 위로만 이동
+        new_stop_price = max(
+            current_stop_price,
+            trailing_stop_price,
+        )
+
+        if new_stop_price > current_stop_price:
+            position_data[
+                "stop_price"
+            ] = new_stop_price
+
+            position_data[
+                "trailing_stop_price"
+            ] = new_stop_price
+
+            print(
+                f"⬆ {position_data['symbol']} "
+                f"트레일링 손절가 상승: "
+                f"{new_stop_price:,.8f}"
+            )
+
+            changed = True
+
+    elif side == "SHORT":
+        previous_lowest = float(
+            position_data[
+                "lowest_price"
+            ]
+        )
+
+        new_lowest = min(
+            previous_lowest,
+            current_price,
+        )
+
+        if new_lowest != previous_lowest:
+            position_data[
+                "lowest_price"
+            ] = new_lowest
+
+            changed = True
+
+        trailing_stop_price = (
+            new_lowest
+            * (1 + distance)
+        )
+
+        current_stop_price = float(
+            position_data["stop_price"]
+        )
+
+        # 숏은 손절선이 아래로만 이동
+        new_stop_price = min(
+            current_stop_price,
+            trailing_stop_price,
+        )
+
+        if new_stop_price < current_stop_price:
+            position_data[
+                "stop_price"
+            ] = new_stop_price
+
+            position_data[
+                "trailing_stop_price"
+            ] = new_stop_price
+
+            print(
+                f"⬇ {position_data['symbol']} "
+                f"트레일링 손절가 하락: "
+                f"{new_stop_price:,.8f}"
+            )
+
+            changed = True
+
+    return changed
 
 
 # ==================================================
@@ -292,6 +489,7 @@ def open_position(candidate):
             f"{symbol}: 재진입 대기 중 "
             f"({format_remaining_time(remaining_seconds)})"
         )
+
         return False
 
     if (
@@ -345,25 +543,43 @@ def open_position(candidate):
             "reasons",
             [],
         ),
+
         "atr": float(
             candidate.get(
                 "atr",
                 0,
             )
         ),
+
         "atr_percent": float(
             candidate.get(
                 "atr_percent",
                 0,
             )
         ),
+
         "exit_mode": config.EXIT_MODE,
+
         "stop_percent": stop_percent,
+
         "take_profit_percent": (
             take_profit_percent
         ),
+
         "stop_price": stop_price,
+
+        "original_stop_price": (
+            stop_price
+        ),
+
         "target_price": target_price,
+
+        # 트레일링 데이터
+        "trailing_active": False,
+        "trailing_stop_price": 0.0,
+        "highest_price": current_price,
+        "lowest_price": current_price,
+
         "opened_at": datetime.now(),
     }
 
@@ -376,42 +592,57 @@ def open_position(candidate):
     print("🚀 가상 포지션 진입")
     print(f"종목: {symbol}")
     print(f"방향: {side}")
+
     print(
         f"점수: "
         f"{candidate['score']}점"
     )
+
     print(
         f"진입가: "
         f"{current_price:,.8f}"
     )
+
     print(
         f"투입금: "
         f"{investment:,.0f}원"
     )
+
     print(
         f"청산 방식: "
         f"{config.EXIT_MODE}"
     )
-    print(
-        f"ATR: "
-        f"{candidate.get('atr_percent', 0):.3f}%"
-    )
+
     print(
         f"손절 폭: "
         f"-{stop_percent:.3f}%"
     )
+
     print(
         f"손절가: "
         f"{stop_price:,.8f}"
     )
+
     print(
         f"익절 폭: "
         f"+{take_profit_percent:.3f}%"
     )
+
     print(
         f"익절가: "
         f"{target_price:,.8f}"
     )
+
+    if config.TRAILING_STOP_ENABLED:
+        print(
+            f"트레일링 시작: "
+            f"+{config.TRAILING_ACTIVATION_PERCENT}%"
+        )
+
+        print(
+            f"트레일링 거리: "
+            f"{config.TRAILING_DISTANCE_PERCENT}%"
+        )
 
     reasons = candidate.get(
         "reasons",
@@ -474,33 +705,41 @@ def close_position(
     print()
     print("💰 가상 포지션 청산")
     print(f"종목: {symbol}")
+
     print(
         f"방향: "
         f"{position_data['side']}"
     )
+
     print(
         f"진입가: "
         f"{position_data['entry_price']:,.8f}"
     )
+
     print(
         f"청산가: "
         f"{current_price:,.8f}"
     )
+
     print(
         f"청산 이유: {reason}"
     )
+
     print(
         f"가격 수익률: "
         f"{gross_percent:+.3f}%"
     )
+
     print(
         f"수수료 반영: "
         f"{net_percent:+.3f}%"
     )
+
     print(
         f"손익: "
         f"{profit_amount:+,.0f}원"
     )
+
     print(
         f"현재 잔고: "
         f"{balance:,.0f}원"
@@ -536,6 +775,7 @@ def close_position(
     print(
         f"{symbol} 재진입 대기 시작"
     )
+
     print()
 
 
@@ -560,7 +800,7 @@ def monitor_positions():
                 symbol
             ]
 
-            if ensure_exit_data(
+            if ensure_position_data(
                 symbol,
                 position_data,
             ):
@@ -571,6 +811,17 @@ def monitor_positions():
                     symbol
                 )
             )
+
+            # 트레일링 손절선 갱신
+            if update_trailing_stop(
+                position_data,
+                current_price,
+            ):
+                positions[
+                    symbol
+                ] = position_data
+
+                state_changed = True
 
             gross_percent = (
                 calculate_gross_profit_percent(
@@ -608,6 +859,14 @@ def monitor_positions():
                 ]
             )
 
+            trailing_text = (
+                "ON"
+                if position_data[
+                    "trailing_active"
+                ]
+                else "OFF"
+            )
+
             print(
                 f"[보유] {symbol:<14} "
                 f"{position_data['side']:<5} | "
@@ -615,20 +874,31 @@ def monitor_positions():
                 f"{net_percent:+.3f}% | "
                 f"{unrealized_profit:+,.0f}원 | "
                 f"SL {stop_price:,.8f} | "
-                f"TP {target_price:,.8f}"
+                f"TP {target_price:,.8f} | "
+                f"TRAIL {trailing_text}"
             )
 
             side = position_data["side"]
 
             if side == "LONG":
                 if current_price <= stop_price:
+                    if position_data[
+                        "trailing_active"
+                    ]:
+                        reason = (
+                            "트레일링 스톱 "
+                            f"{stop_price:,.8f}"
+                        )
+                    else:
+                        reason = (
+                            "손절 "
+                            f"-{position_data['stop_percent']:.3f}%"
+                        )
+
                     close_position(
                         symbol=symbol,
                         current_price=current_price,
-                        reason=(
-                            f"손절 "
-                            f"-{position_data['stop_percent']:.3f}%"
-                        ),
+                        reason=reason,
                     )
 
                 elif current_price >= target_price:
@@ -636,20 +906,30 @@ def monitor_positions():
                         symbol=symbol,
                         current_price=current_price,
                         reason=(
-                            f"익절 "
+                            "익절 "
                             f"+{position_data['take_profit_percent']:.3f}%"
                         ),
                     )
 
             elif side == "SHORT":
                 if current_price >= stop_price:
+                    if position_data[
+                        "trailing_active"
+                    ]:
+                        reason = (
+                            "트레일링 스톱 "
+                            f"{stop_price:,.8f}"
+                        )
+                    else:
+                        reason = (
+                            "손절 "
+                            f"-{position_data['stop_percent']:.3f}%"
+                        )
+
                     close_position(
                         symbol=symbol,
                         current_price=current_price,
-                        reason=(
-                            f"손절 "
-                            f"-{position_data['stop_percent']:.3f}%"
-                        ),
+                        reason=reason,
                     )
 
                 elif current_price <= target_price:
@@ -657,7 +937,7 @@ def monitor_positions():
                         symbol=symbol,
                         current_price=current_price,
                         reason=(
-                            f"익절 "
+                            "익절 "
                             f"+{position_data['take_profit_percent']:.3f}%"
                         ),
                     )
@@ -691,9 +971,11 @@ def open_top_candidates(
             "오늘 신규 진입이 "
             "중단됐습니다."
         )
+
         print(
             trading_status["reason"]
         )
+
         return
 
     available_slots = (
@@ -706,6 +988,7 @@ def open_top_candidates(
             "최대 포지션에 "
             "도달했습니다."
         )
+
         return
 
     opened_count = 0
@@ -734,11 +1017,13 @@ def open_top_candidates(
 
 def print_account_status():
     print()
-    print("=" * 85)
+    print("=" * 95)
+
     print(
         f"가상잔고: "
         f"{balance:,.0f}원"
     )
+
     print(
         f"보유 포지션: "
         f"{len(positions)}/"
@@ -748,6 +1033,15 @@ def print_account_status():
     for symbol, data in (
         positions.items()
     ):
+        trailing_text = (
+            "ON"
+            if data.get(
+                "trailing_active",
+                False,
+            )
+            else "OFF"
+        )
+
         print(
             f"- {symbol:<14} "
             f"{data['side']:<5} | "
@@ -756,7 +1050,8 @@ def print_account_status():
             f"SL "
             f"{data.get('stop_price', 0):,.8f} | "
             f"TP "
-            f"{data.get('target_price', 0):,.8f}"
+            f"{data.get('target_price', 0):,.8f} | "
+            f"TRAIL {trailing_text}"
         )
 
-    print("=" * 85)
+    print("=" * 95)
