@@ -6,6 +6,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 
 from binance_api import request_json
+from engine.strategy import calculate_score
 
 
 # ==================================================
@@ -27,10 +28,47 @@ EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
 
-MIN_VOLUME_RATIO = 1.20
-MIN_MOVE_PERCENT = 0.15
-
 REQUEST_DELAY_SECONDS = 0.15
+
+
+# ==================================================
+# 시간 간격 계산
+# ==================================================
+
+def get_interval_minutes():
+    interval = INTERVAL.lower().strip()
+
+    if interval.endswith("m"):
+        return int(interval[:-1])
+
+    if interval.endswith("h"):
+        return int(interval[:-1]) * 60
+
+    if interval.endswith("d"):
+        return int(interval[:-1]) * 1440
+
+    raise ValueError(
+        f"지원하지 않는 봉 간격: {INTERVAL}"
+    )
+
+
+def get_24h_lookback_bars():
+    interval_minutes = get_interval_minutes()
+
+    return max(
+        1,
+        int(1440 / interval_minutes),
+    )
+
+
+def get_momentum_lookback_bars():
+    interval_minutes = get_interval_minutes()
+
+    # 실제 전략의 5분 움직임과 최대한 동일하게 맞춤
+    return max(
+        1,
+        int(round(5 / interval_minutes)),
+    )
 
 
 # ==================================================
@@ -49,10 +87,22 @@ def download_historical_candles():
     )
 
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(days=BACKTEST_DAYS)
+    start_time = (
+        end_time
+        - timedelta(days=BACKTEST_DAYS)
+    )
 
-    current_start = datetime_to_milliseconds(start_time)
-    final_end = datetime_to_milliseconds(end_time)
+    current_start = (
+        datetime_to_milliseconds(
+            start_time
+        )
+    )
+
+    final_end = (
+        datetime_to_milliseconds(
+            end_time
+        )
+    )
 
     all_candles = []
 
@@ -73,7 +123,10 @@ def download_historical_candles():
 
         all_candles.extend(candles)
 
-        last_open_time = int(candles[-1][0])
+        last_open_time = int(
+            candles[-1][0]
+        )
+
         next_start = last_open_time + 1
 
         if next_start <= current_start:
@@ -82,12 +135,15 @@ def download_historical_candles():
         current_start = next_start
 
         print(
-            f"\r다운로드된 캔들: {len(all_candles):,}개",
+            f"\r다운로드된 캔들: "
+            f"{len(all_candles):,}개",
             end="",
             flush=True,
         )
 
-        time.sleep(REQUEST_DELAY_SECONDS)
+        time.sleep(
+            REQUEST_DELAY_SECONDS
+        )
 
         if len(candles) < 1500:
             break
@@ -95,9 +151,10 @@ def download_historical_candles():
     print()
 
     if not all_candles:
-        raise RuntimeError("캔들 데이터를 가져오지 못했습니다.")
+        raise RuntimeError(
+            "캔들 데이터를 가져오지 못했습니다."
+        )
 
-    # 중복 캔들 제거
     unique_candles = {
         int(candle[0]): candle
         for candle in all_candles
@@ -122,19 +179,35 @@ def candles_to_dataframe(candles):
                     unit="ms",
                     utc=True,
                 ),
-                "open": float(candle[1]),
-                "high": float(candle[2]),
-                "low": float(candle[3]),
-                "close": float(candle[4]),
-                "volume": float(candle[5]),
+                "open": float(
+                    candle[1]
+                ),
+                "high": float(
+                    candle[2]
+                ),
+                "low": float(
+                    candle[3]
+                ),
+                "close": float(
+                    candle[4]
+                ),
+                "volume": float(
+                    candle[5]
+                ),
             }
         )
 
-    dataframe = pd.DataFrame(rows)
+    dataframe = pd.DataFrame(
+        rows
+    )
 
     # 현재 진행 중일 수 있는 마지막 봉 제외
     if len(dataframe) > 1:
-        dataframe = dataframe.iloc[:-1].copy()
+        dataframe = (
+            dataframe
+            .iloc[:-1]
+            .copy()
+        )
 
     return dataframe
 
@@ -161,13 +234,21 @@ def add_indicators(dataframe):
         window=RSI_PERIOD,
     ).rsi()
 
-    # 5분봉 한 개 전 대비 변화율
-    dataframe["move_percent"] = (
-        dataframe["close"].pct_change() * 100
+    momentum_bars = (
+        get_momentum_lookback_bars()
     )
 
-    # 직전 5개 봉 평균 거래량
-    dataframe["previous_volume_average"] = (
+    dataframe["move_5m"] = (
+        dataframe["close"]
+        .pct_change(
+            periods=momentum_bars
+        )
+        * 100
+    )
+
+    dataframe[
+        "previous_volume_average"
+    ] = (
         dataframe["volume"]
         .shift(1)
         .rolling(window=5)
@@ -176,66 +257,126 @@ def add_indicators(dataframe):
 
     dataframe["volume_ratio"] = (
         dataframe["volume"]
-        / dataframe["previous_volume_average"]
+        / dataframe[
+            "previous_volume_average"
+        ]
     )
 
-    dataframe = dataframe.dropna().reset_index(drop=True)
+    lookback_24h = (
+        get_24h_lookback_bars()
+    )
+
+    dataframe["price_change_24h"] = (
+        dataframe["close"]
+        .pct_change(
+            periods=lookback_24h
+        )
+        * 100
+    )
+
+    dataframe = (
+        dataframe
+        .dropna()
+        .reset_index(drop=True)
+    )
 
     return dataframe
 
 
 # ==================================================
-# 진입 신호
+# 실제 전략 엔진을 사용하는 진입 신호
 # ==================================================
 
-def get_entry_signal(row):
-    long_condition = (
-        row["ema20"] > row["ema50"]
-        and 45 <= row["rsi"] <= 68
-        and row["move_percent"] >= MIN_MOVE_PERCENT
-        and row["volume_ratio"] >= MIN_VOLUME_RATIO
+def build_strategy_item(row):
+    return {
+        "symbol": SYMBOL,
+        "current_price": float(
+            row["close"]
+        ),
+        "move_5m": float(
+            row["move_5m"]
+        ),
+        "volume_ratio": float(
+            row["volume_ratio"]
+        ),
+        "price_change_24h": float(
+            row["price_change_24h"]
+        ),
+        "ema20": float(
+            row["ema20"]
+        ),
+        "ema50": float(
+            row["ema50"]
+        ),
+        "rsi": float(
+            row["rsi"]
+        ),
+
+        # 현재 strategy.py에는 직접 사용되지 않지만,
+        # 실거래 스캐너 결과 구조와 맞추기 위해 포함
+        "atr": 0.0,
+        "atr_percent": 0.0,
+    }
+
+
+def get_entry_result(row):
+    strategy_item = (
+        build_strategy_item(
+            row
+        )
     )
 
-    short_condition = (
-        row["ema20"] < row["ema50"]
-        and 32 <= row["rsi"] <= 55
-        and row["move_percent"] <= -MIN_MOVE_PERCENT
-        and row["volume_ratio"] >= MIN_VOLUME_RATIO
+    return calculate_score(
+        strategy_item
     )
-
-    if long_condition:
-        return "LONG"
-
-    if short_condition:
-        return "SHORT"
-
-    return None
 
 
 # ==================================================
 # 손절·익절 가격
 # ==================================================
 
-def calculate_exit_prices(side, entry_price):
+def calculate_exit_prices(
+    side,
+    entry_price,
+):
     if side == "LONG":
-        stop_price = entry_price * (
-            1 - STOP_LOSS_PERCENT / 100
+        stop_price = (
+            entry_price
+            * (
+                1
+                - STOP_LOSS_PERCENT / 100
+            )
         )
 
-        target_price = entry_price * (
-            1 + TAKE_PROFIT_PERCENT / 100
+        target_price = (
+            entry_price
+            * (
+                1
+                + TAKE_PROFIT_PERCENT / 100
+            )
         )
 
     else:
-        stop_price = entry_price * (
-            1 + STOP_LOSS_PERCENT / 100
+        stop_price = (
+            entry_price
+            * (
+                1
+                + STOP_LOSS_PERCENT / 100
+            )
         )
 
-        target_price = entry_price * (
-            1 - TAKE_PROFIT_PERCENT / 100
+        target_price = (
+            entry_price
+            * (
+                1
+                - TAKE_PROFIT_PERCENT / 100
+            )
         )
 
-    return stop_price, target_price
+    return (
+        stop_price,
+        target_price,
+    )
 
 
 def calculate_gross_profit_percent(
@@ -245,13 +386,19 @@ def calculate_gross_profit_percent(
 ):
     if side == "LONG":
         return (
-            (exit_price - entry_price)
+            (
+                exit_price
+                - entry_price
+            )
             / entry_price
             * 100
         )
 
     return (
-        (entry_price - exit_price)
+        (
+            entry_price
+            - exit_price
+        )
         / entry_price
         * 100
     )
@@ -262,14 +409,21 @@ def calculate_gross_profit_percent(
 # ==================================================
 
 def run_backtest(dataframe):
-    balance = float(STARTING_BALANCE)
+    balance = float(
+        STARTING_BALANCE
+    )
+
     peak_balance = balance
     maximum_drawdown = 0.0
 
     position = None
     trades = []
 
-    for index in range(len(dataframe)):
+    signal_count = 0
+
+    for index in range(
+        len(dataframe)
+    ):
         row = dataframe.iloc[index]
 
         # ------------------------------------------
@@ -278,42 +432,85 @@ def run_backtest(dataframe):
 
         if position is not None:
             side = position["side"]
-            stop_price = position["stop_price"]
-            target_price = position["target_price"]
+
+            stop_price = position[
+                "stop_price"
+            ]
+
+            target_price = position[
+                "target_price"
+            ]
 
             exit_price = None
             exit_reason = None
 
             if side == "LONG":
-                stop_touched = row["low"] <= stop_price
-                target_touched = row["high"] >= target_price
+                stop_touched = (
+                    row["low"]
+                    <= stop_price
+                )
 
-                # 같은 봉에서 둘 다 닿으면 보수적으로 손절 우선
+                target_touched = (
+                    row["high"]
+                    >= target_price
+                )
+
+                # 같은 봉에서 둘 다 닿으면
+                # 보수적으로 손절 우선
                 if stop_touched:
-                    exit_price = stop_price
-                    exit_reason = "STOP"
+                    exit_price = (
+                        stop_price
+                    )
+
+                    exit_reason = (
+                        "STOP"
+                    )
 
                 elif target_touched:
-                    exit_price = target_price
-                    exit_reason = "TAKE_PROFIT"
+                    exit_price = (
+                        target_price
+                    )
+
+                    exit_reason = (
+                        "TAKE_PROFIT"
+                    )
 
             else:
-                stop_touched = row["high"] >= stop_price
-                target_touched = row["low"] <= target_price
+                stop_touched = (
+                    row["high"]
+                    >= stop_price
+                )
+
+                target_touched = (
+                    row["low"]
+                    <= target_price
+                )
 
                 if stop_touched:
-                    exit_price = stop_price
-                    exit_reason = "STOP"
+                    exit_price = (
+                        stop_price
+                    )
+
+                    exit_reason = (
+                        "STOP"
+                    )
 
                 elif target_touched:
-                    exit_price = target_price
-                    exit_reason = "TAKE_PROFIT"
+                    exit_price = (
+                        target_price
+                    )
+
+                    exit_reason = (
+                        "TAKE_PROFIT"
+                    )
 
             if exit_price is not None:
                 gross_percent = (
                     calculate_gross_profit_percent(
                         side,
-                        position["entry_price"],
+                        position[
+                            "entry_price"
+                        ],
                         exit_price,
                     )
                 )
@@ -324,7 +521,9 @@ def run_backtest(dataframe):
                 )
 
                 profit_amount = (
-                    position["investment"]
+                    position[
+                        "investment"
+                    ]
                     * net_percent
                     / 100
                 )
@@ -334,14 +533,44 @@ def run_backtest(dataframe):
                 trades.append(
                     {
                         "side": side,
-                        "entry_time": position["entry_time"],
-                        "exit_time": row["time"],
-                        "entry_price": position["entry_price"],
-                        "exit_price": exit_price,
-                        "gross_percent": gross_percent,
-                        "net_percent": net_percent,
-                        "profit_amount": profit_amount,
-                        "reason": exit_reason,
+                        "entry_time": (
+                            position[
+                                "entry_time"
+                            ]
+                        ),
+                        "exit_time": (
+                            row["time"]
+                        ),
+                        "entry_price": (
+                            position[
+                                "entry_price"
+                            ]
+                        ),
+                        "exit_price": (
+                            exit_price
+                        ),
+                        "gross_percent": (
+                            gross_percent
+                        ),
+                        "net_percent": (
+                            net_percent
+                        ),
+                        "profit_amount": (
+                            profit_amount
+                        ),
+                        "reason": (
+                            exit_reason
+                        ),
+                        "entry_score": (
+                            position[
+                                "entry_score"
+                            ]
+                        ),
+                        "entry_reasons": (
+                            position[
+                                "entry_reasons"
+                            ]
+                        ),
                     }
                 )
 
@@ -351,7 +580,10 @@ def run_backtest(dataframe):
                 )
 
                 drawdown = (
-                    (peak_balance - balance)
+                    (
+                        peak_balance
+                        - balance
+                    )
                     / peak_balance
                     * 100
                 )
@@ -363,7 +595,8 @@ def run_backtest(dataframe):
 
                 position = None
 
-                # 같은 봉에서 청산 후 재진입하지 않음
+                # 같은 봉에서 청산 후
+                # 재진입하지 않음
                 continue
 
         # ------------------------------------------
@@ -371,19 +604,33 @@ def run_backtest(dataframe):
         # ------------------------------------------
 
         if position is None:
-            signal = get_entry_signal(row)
+            strategy_result = (
+                get_entry_result(
+                    row
+                )
+            )
 
-            if signal is None:
+            signal = (
+                strategy_result[
+                    "side"
+                ]
+            )
+
+            if signal == "NONE":
                 continue
 
-            # 신호가 나온 봉 종가에서 진입한다고 가정
-            entry_price = row["close"]
+            signal_count += 1
 
-            stop_price, target_price = (
-                calculate_exit_prices(
-                    signal,
-                    entry_price,
-                )
+            entry_price = float(
+                row["close"]
+            )
+
+            (
+                stop_price,
+                target_price,
+            ) = calculate_exit_prices(
+                signal,
+                entry_price,
             )
 
             investment = (
@@ -394,22 +641,51 @@ def run_backtest(dataframe):
 
             position = {
                 "side": signal,
-                "entry_time": row["time"],
-                "entry_price": entry_price,
-                "stop_price": stop_price,
-                "target_price": target_price,
-                "investment": investment,
+                "entry_time": (
+                    row["time"]
+                ),
+                "entry_price": (
+                    entry_price
+                ),
+                "stop_price": (
+                    stop_price
+                ),
+                "target_price": (
+                    target_price
+                ),
+                "investment": (
+                    investment
+                ),
+                "entry_score": (
+                    strategy_result[
+                        "score"
+                    ]
+                ),
+                "entry_reasons": (
+                    strategy_result[
+                        "reasons"
+                    ]
+                ),
             }
 
     # 데이터 종료 시 열린 포지션 강제 청산
     if position is not None:
-        last_row = dataframe.iloc[-1]
-        exit_price = last_row["close"]
+        last_row = (
+            dataframe.iloc[-1]
+        )
 
-        gross_percent = calculate_gross_profit_percent(
-            position["side"],
-            position["entry_price"],
-            exit_price,
+        exit_price = float(
+            last_row["close"]
+        )
+
+        gross_percent = (
+            calculate_gross_profit_percent(
+                position["side"],
+                position[
+                    "entry_price"
+                ],
+                exit_price,
+            )
         )
 
         net_percent = (
@@ -418,7 +694,9 @@ def run_backtest(dataframe):
         )
 
         profit_amount = (
-            position["investment"]
+            position[
+                "investment"
+            ]
             * net_percent
             / 100
         )
@@ -427,22 +705,63 @@ def run_backtest(dataframe):
 
         trades.append(
             {
-                "side": position["side"],
-                "entry_time": position["entry_time"],
-                "exit_time": last_row["time"],
-                "entry_price": position["entry_price"],
-                "exit_price": exit_price,
-                "gross_percent": gross_percent,
-                "net_percent": net_percent,
-                "profit_amount": profit_amount,
-                "reason": "END_OF_DATA",
+                "side": (
+                    position["side"]
+                ),
+                "entry_time": (
+                    position[
+                        "entry_time"
+                    ]
+                ),
+                "exit_time": (
+                    last_row["time"]
+                ),
+                "entry_price": (
+                    position[
+                        "entry_price"
+                    ]
+                ),
+                "exit_price": (
+                    exit_price
+                ),
+                "gross_percent": (
+                    gross_percent
+                ),
+                "net_percent": (
+                    net_percent
+                ),
+                "profit_amount": (
+                    profit_amount
+                ),
+                "reason": (
+                    "END_OF_DATA"
+                ),
+                "entry_score": (
+                    position[
+                        "entry_score"
+                    ]
+                ),
+                "entry_reasons": (
+                    position[
+                        "entry_reasons"
+                    ]
+                ),
             }
         )
 
     return {
-        "starting_balance": STARTING_BALANCE,
-        "ending_balance": balance,
-        "maximum_drawdown": maximum_drawdown,
+        "starting_balance": (
+            STARTING_BALANCE
+        ),
+        "ending_balance": (
+            balance
+        ),
+        "maximum_drawdown": (
+            maximum_drawdown
+        ),
+        "signal_count": (
+            signal_count
+        ),
         "trades": trades,
     }
 
@@ -451,38 +770,73 @@ def run_backtest(dataframe):
 # 결과 출력
 # ==================================================
 
-def calculate_maximum_streak(trades, win):
+def calculate_maximum_streak(
+    trades,
+    win,
+):
     maximum = 0
     current = 0
 
     for trade in trades:
-        is_win = trade["profit_amount"] > 0
+        is_win = (
+            trade["profit_amount"]
+            > 0
+        )
 
         if is_win == win:
             current += 1
-            maximum = max(maximum, current)
+
+            maximum = max(
+                maximum,
+                current,
+            )
         else:
             current = 0
 
     return maximum
 
 
-def print_report(result, dataframe):
+def print_report(
+    result,
+    dataframe,
+):
     trades = result["trades"]
 
     print()
-    print("=" * 68)
-    print("BinanceBot 백테스트 결과")
-    print("=" * 68)
+    print("=" * 72)
+    print(
+        "BinanceBot 통합 전략 백테스트 결과"
+    )
+    print("=" * 72)
 
     print(f"종목: {SYMBOL}")
     print(f"봉 간격: {INTERVAL}")
-    print(f"분석 기간: {BACKTEST_DAYS}일")
-    print(f"캔들 수: {len(dataframe):,}개")
+    print(
+        f"분석 기간: "
+        f"{BACKTEST_DAYS}일"
+    )
+    print(
+        f"캔들 수: "
+        f"{len(dataframe):,}개"
+    )
+    print(
+        "전략 엔진: "
+        "engine.strategy.calculate_score"
+    )
+    print(
+        f"발생한 진입 신호: "
+        f"{result['signal_count']}회"
+    )
     print()
 
-    print(f"시작 잔고: {result['starting_balance']:,.0f}원")
-    print(f"종료 잔고: {result['ending_balance']:,.0f}원")
+    print(
+        f"시작 잔고: "
+        f"{result['starting_balance']:,.0f}원"
+    )
+    print(
+        f"종료 잔고: "
+        f"{result['ending_balance']:,.0f}원"
+    )
 
     total_return = (
         (
@@ -493,16 +847,24 @@ def print_report(result, dataframe):
         * 100
     )
 
-    print(f"총 수익률: {total_return:+.3f}%")
+    print(
+        f"총 수익률: "
+        f"{total_return:+.3f}%"
+    )
+
     print(
         f"최대 낙폭(MDD): "
-        f"-{result['maximum_drawdown']:.3f}%"
+        f"-"
+        f"{result['maximum_drawdown']:.3f}%"
     )
+
     print()
 
     if not trades:
-        print("발생한 거래가 없습니다.")
-        print("=" * 68)
+        print(
+            "발생한 거래가 없습니다."
+        )
+        print("=" * 72)
         return
 
     wins = [
@@ -518,17 +880,25 @@ def print_report(result, dataframe):
     ]
 
     total_trades = len(trades)
-    win_rate = len(wins) / total_trades * 100
+
+    win_rate = (
+        len(wins)
+        / total_trades
+        * 100
+    )
 
     total_profit = sum(
         trade["profit_amount"]
         for trade in trades
     )
 
-    average_trade_percent = sum(
-        trade["net_percent"]
-        for trade in trades
-    ) / total_trades
+    average_trade_percent = (
+        sum(
+            trade["net_percent"]
+            for trade in trades
+        )
+        / total_trades
+    )
 
     average_win = (
         sum(
@@ -550,29 +920,71 @@ def print_report(result, dataframe):
         else 0.0
     )
 
+    average_entry_score = (
+        sum(
+            trade["entry_score"]
+            for trade in trades
+        )
+        / total_trades
+    )
+
     long_trades = sum(
         1
         for trade in trades
         if trade["side"] == "LONG"
     )
 
-    short_trades = total_trades - long_trades
+    short_trades = (
+        total_trades
+        - long_trades
+    )
 
-    print(f"총 거래: {total_trades}회")
-    print(f"롱 거래: {long_trades}회")
-    print(f"숏 거래: {short_trades}회")
-    print(f"승리: {len(wins)}회")
-    print(f"손실: {len(losses)}회")
-    print(f"승률: {win_rate:.2f}%")
+    print(
+        f"총 거래: "
+        f"{total_trades}회"
+    )
+    print(
+        f"롱 거래: "
+        f"{long_trades}회"
+    )
+    print(
+        f"숏 거래: "
+        f"{short_trades}회"
+    )
+    print(
+        f"승리: "
+        f"{len(wins)}회"
+    )
+    print(
+        f"손실: "
+        f"{len(losses)}회"
+    )
+    print(
+        f"승률: "
+        f"{win_rate:.2f}%"
+    )
+    print(
+        f"평균 진입 점수: "
+        f"{average_entry_score:.2f}점"
+    )
     print()
 
-    print(f"누적 손익: {total_profit:+,.0f}원")
+    print(
+        f"누적 손익: "
+        f"{total_profit:+,.0f}원"
+    )
     print(
         f"평균 거래 수익률: "
         f"{average_trade_percent:+.3f}%"
     )
-    print(f"평균 수익금: {average_win:+,.0f}원")
-    print(f"평균 손실금: {average_loss:+,.0f}원")
+    print(
+        f"평균 수익금: "
+        f"{average_win:+,.0f}원"
+    )
+    print(
+        f"평균 손실금: "
+        f"{average_loss:+,.0f}원"
+    )
 
     print(
         "최대 연속 승리: "
@@ -586,22 +998,36 @@ def print_report(result, dataframe):
 
     print()
     print("최근 거래 10건")
-    print("-" * 68)
+    print("-" * 72)
 
     for trade in trades[-10:]:
-        entry_text = trade["entry_time"].strftime(
-            "%Y-%m-%d %H:%M"
+        entry_text = (
+            trade["entry_time"]
+            .strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        )
+
+        reasons_text = (
+            ", ".join(
+                trade[
+                    "entry_reasons"
+                ]
+            )
+            or "-"
         )
 
         print(
             f"{entry_text} | "
             f"{trade['side']:<5} | "
+            f"{trade['entry_score']:>3}점 | "
             f"{trade['net_percent']:+.3f}% | "
             f"{trade['profit_amount']:+,.0f}원 | "
-            f"{trade['reason']}"
+            f"{trade['reason']} | "
+            f"{reasons_text}"
         )
 
-    print("=" * 68)
+    print("=" * 72)
 
 
 # ==================================================
@@ -610,23 +1036,47 @@ def print_report(result, dataframe):
 
 def main():
     try:
-        candles = download_historical_candles()
-        dataframe = candles_to_dataframe(candles)
-        dataframe = add_indicators(dataframe)
+        candles = (
+            download_historical_candles()
+        )
+
+        dataframe = (
+            candles_to_dataframe(
+                candles
+            )
+        )
+
+        dataframe = (
+            add_indicators(
+                dataframe
+            )
+        )
 
         print(
-            f"지표 계산 완료: {len(dataframe):,}개 봉",
+            f"지표 계산 완료: "
+            f"{len(dataframe):,}개 봉",
             flush=True,
         )
 
-        result = run_backtest(dataframe)
-        print_report(result, dataframe)
+        result = run_backtest(
+            dataframe
+        )
+
+        print_report(
+            result,
+            dataframe,
+        )
 
     except KeyboardInterrupt:
-        print("\n백테스트를 중단했습니다.")
+        print(
+            "\n백테스트를 중단했습니다."
+        )
 
     except Exception as error:
-        print(f"백테스트 오류: {repr(error)}")
+        print(
+            f"백테스트 오류: "
+            f"{repr(error)}"
+        )
 
 
 if __name__ == "__main__":
