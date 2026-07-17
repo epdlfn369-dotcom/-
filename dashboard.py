@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from binance_api import request_json
+from position_snapshot import create_position_snapshot
 from scanner import scan_market
 from strategy import rank_candidates
 
@@ -55,10 +56,7 @@ def load_state():
         return balance, positions
 
     except Exception as error:
-        st.error(
-            f"state.json 읽기 오류: {error}"
-        )
-
+        st.error(f"state.json 읽기 오류: {error}")
         return float(STARTING_BALANCE), {}
 
 
@@ -73,10 +71,7 @@ def load_trades():
         )
 
     except Exception as error:
-        st.error(
-            f"trade_log.csv 읽기 오류: {error}"
-        )
-
+        st.error(f"trade_log.csv 읽기 오류: {error}")
         return pd.DataFrame()
 
 
@@ -99,24 +94,14 @@ def calculate_statistics(trades):
         errors="coerce",
     ).fillna(0.0)
 
-    wins = int(
-        (profit_values > 0).sum()
-    )
-
-    losses = int(
-        (profit_values <= 0).sum()
-    )
-
+    wins = int((profit_values > 0).sum())
+    losses = int((profit_values <= 0).sum())
     total_trades = len(profit_values)
 
     win_rate = (
         wins / total_trades * 100
-        if total_trades
+        if total_trades > 0
         else 0.0
-    )
-
-    total_profit = float(
-        profit_values.sum()
     )
 
     return {
@@ -124,12 +109,12 @@ def calculate_statistics(trades):
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
-        "total_profit": total_profit,
+        "total_profit": float(profit_values.sum()),
     }
 
 
 # ==================================================
-# 바이낸스 차트 데이터
+# 차트
 # ==================================================
 
 def get_chart_data(
@@ -198,51 +183,12 @@ def create_candlestick_chart(dataframe, symbol):
 
 
 # ==================================================
-# 현재 포지션 표
-# ==================================================
-
-def create_positions_dataframe(positions):
-    rows = []
-
-    for symbol, position in positions.items():
-        rows.append(
-            {
-                "종목": symbol,
-                "방향": position.get(
-                    "side",
-                    "",
-                ),
-                "진입가": position.get(
-                    "entry_price",
-                    0,
-                ),
-                "투입금": position.get(
-                    "investment",
-                    0,
-                ),
-                "점수": position.get(
-                    "score",
-                    0,
-                ),
-                "진입시간": position.get(
-                    "opened_at",
-                    "",
-                ),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-# ==================================================
-# 후보 시장 분석
+# 시장 후보
 # ==================================================
 
 def analyze_market_candidates():
     market_results = scan_market()
-    candidates = rank_candidates(
-        market_results
-    )
+    candidates = rank_candidates(market_results)
 
     rows = []
 
@@ -252,23 +198,20 @@ def analyze_market_candidates():
                 "종목": candidate["symbol"],
                 "방향": candidate["side"],
                 "점수": candidate["score"],
-                "5분 변동률": (
-                    candidate["move_5m"]
-                ),
-                "거래량 배수": (
-                    candidate["volume_ratio"]
-                ),
-                "RSI": candidate.get(
-                    "rsi",
-                    0,
-                ),
+                "5분 변동률": candidate["move_5m"],
+                "거래량 배수": candidate["volume_ratio"],
+                "RSI": candidate.get("rsi", 0),
                 "24시간 변동률": (
                     candidate["price_change_24h"]
                 ),
             }
         )
 
-    return market_results, candidates, pd.DataFrame(rows)
+    return (
+        market_results,
+        candidates,
+        pd.DataFrame(rows),
+    )
 
 
 def calculate_market_direction(
@@ -296,10 +239,8 @@ def calculate_market_direction(
 
     if long_count > short_count:
         direction = "LONG 우세"
-
     elif short_count > long_count:
         direction = "SHORT 우세"
-
     else:
         direction = "중립"
 
@@ -312,7 +253,7 @@ def calculate_market_direction(
 
 
 # ==================================================
-# 실시간 영역
+# 실시간 BTC 차트
 # ==================================================
 
 @st.fragment(run_every="5s")
@@ -321,9 +262,7 @@ def live_chart_section():
         dataframe = get_chart_data()
 
         if dataframe.empty:
-            st.warning(
-                "차트 데이터를 가져오지 못했습니다."
-            )
+            st.warning("차트 데이터가 없습니다.")
             return
 
         latest_price = float(
@@ -340,18 +279,16 @@ def live_chart_section():
             * 100
         )
 
-        price_column, time_column = st.columns(
-            [1, 2]
-        )
+        first, second = st.columns([1, 2])
 
-        with price_column:
+        with first:
             st.metric(
                 f"{CHART_SYMBOL} 현재가",
                 f"{latest_price:,.2f} USDT",
                 f"{change_percent:+.3f}%",
             )
 
-        with time_column:
+        with second:
             st.info(
                 "5초마다 자동 갱신 중\n\n"
                 f"갱신 시각: "
@@ -369,8 +306,151 @@ def live_chart_section():
         )
 
     except Exception as error:
+        st.error(f"실시간 차트 오류: {error}")
+
+
+# ==================================================
+# 실시간 포지션
+# ==================================================
+
+@st.fragment(run_every="5s")
+def live_position_section():
+    try:
+        snapshot = create_position_snapshot()
+
+        balance = snapshot["balance"]
+        unrealized_profit = snapshot[
+            "total_unrealized_profit"
+        ]
+        estimated_balance = snapshot[
+            "estimated_balance"
+        ]
+        positions = snapshot["positions"]
+
+        first, second, third, fourth = st.columns(4)
+
+        with first:
+            st.metric(
+                "확정 가상잔고",
+                f"{balance:,.0f}원",
+            )
+
+        with second:
+            st.metric(
+                "미실현 손익",
+                f"{unrealized_profit:+,.0f}원",
+            )
+
+        with third:
+            st.metric(
+                "미실현 포함 잔고",
+                f"{estimated_balance:,.0f}원",
+                f"{estimated_balance - STARTING_BALANCE:+,.0f}원",
+            )
+
+        with fourth:
+            st.metric(
+                "보유 포지션",
+                f"{len(positions)}개",
+            )
+
+        st.caption(
+            "포지션 현재가는 5초마다 자동 갱신됩니다."
+        )
+
+        if not positions:
+            st.info("현재 보유 중인 포지션이 없습니다.")
+            return
+
+        rows = []
+
+        for position in positions:
+            if "error" in position:
+                rows.append(
+                    {
+                        "종목": position.get(
+                            "symbol",
+                            "",
+                        ),
+                        "방향": position.get(
+                            "side",
+                            "",
+                        ),
+                        "상태": (
+                            f"가격 조회 실패: "
+                            f"{position['error']}"
+                        ),
+                    }
+                )
+                continue
+
+            rows.append(
+                {
+                    "종목": position["symbol"],
+                    "방향": position["side"],
+                    "진입가": position["entry_price"],
+                    "현재가": position["current_price"],
+                    "투입금": position["investment"],
+                    "수익률": (
+                        position["profit_percent"]
+                    ),
+                    "미실현 손익": (
+                        position["profit_amount"]
+                    ),
+                    "점수": position["score"],
+                    "진입시간": (
+                        position["opened_at"]
+                    ),
+                }
+            )
+
+        dataframe = pd.DataFrame(rows)
+
+        st.dataframe(
+            dataframe,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "진입가": st.column_config.NumberColumn(
+                    format="%.8f"
+                ),
+                "현재가": st.column_config.NumberColumn(
+                    format="%.8f"
+                ),
+                "투입금": st.column_config.NumberColumn(
+                    format="%,.0f원"
+                ),
+                "수익률": st.column_config.NumberColumn(
+                    format="%+.3f%%"
+                ),
+                "미실현 손익": (
+                    st.column_config.NumberColumn(
+                        format="%+,.0f원"
+                    )
+                ),
+            },
+        )
+
+        st.subheader("포지션별 미실현 손익")
+
+        chart_rows = [
+            row
+            for row in rows
+            if "미실현 손익" in row
+        ]
+
+        if chart_rows:
+            chart_dataframe = pd.DataFrame(
+                chart_rows
+            ).set_index("종목")
+
+            st.bar_chart(
+                chart_dataframe["미실현 손익"]
+            )
+
+    except Exception as error:
         st.error(
-            f"실시간 차트 오류: {error}"
+            f"실시간 포지션 조회 오류: {error}"
         )
 
 
@@ -396,54 +476,55 @@ def main():
     trades = load_trades()
     stats = calculate_statistics(trades)
 
-    balance_column, profit_column, win_column, position_column = (
-        st.columns(4)
-    )
+    first, second, third, fourth = st.columns(4)
 
-    with balance_column:
+    with first:
         st.metric(
             "가상잔고",
             f"{balance:,.0f}원",
             f"{balance - STARTING_BALANCE:+,.0f}원",
         )
 
-    with profit_column:
+    with second:
         st.metric(
             "누적 실현손익",
             f"{stats['total_profit']:+,.0f}원",
         )
 
-    with win_column:
+    with third:
         st.metric(
             "승률",
             f"{stats['win_rate']:.2f}%",
             f"{stats['total_trades']}회 거래",
         )
 
-    with position_column:
+    with fourth:
         st.metric(
-            "현재 포지션",
+            "저장된 포지션",
             f"{len(positions)}개",
         )
 
     st.divider()
 
-    dashboard_tab, market_tab, position_tab, trade_tab = (
-        st.tabs(
-            [
-                "실시간 차트",
-                "시장 후보",
-                "현재 포지션",
-                "거래 기록",
-            ]
-        )
+    (
+        chart_tab,
+        market_tab,
+        position_tab,
+        trade_tab,
+    ) = st.tabs(
+        [
+            "실시간 차트",
+            "시장 후보",
+            "실시간 포지션",
+            "거래 기록",
+        ]
     )
 
     # ----------------------------------------------
     # 실시간 차트
     # ----------------------------------------------
 
-    with dashboard_tab:
+    with chart_tab:
         live_chart_section()
 
     # ----------------------------------------------
@@ -454,8 +535,8 @@ def main():
         st.subheader("전체 시장 후보 분석")
 
         st.warning(
-            "전체 시장 스캔은 여러 코인의 캔들을 "
-            "조회하므로 버튼을 눌렀을 때만 실행합니다."
+            "전체 시장 스캔은 버튼을 눌렀을 때만 "
+            "실행됩니다."
         )
 
         if st.button(
@@ -478,14 +559,6 @@ def main():
                             candidates,
                         )
                     )
-
-                    st.session_state[
-                        "market_results"
-                    ] = market_results
-
-                    st.session_state[
-                        "candidates"
-                    ] = candidates
 
                     st.session_state[
                         "candidate_dataframe"
@@ -546,57 +619,41 @@ def main():
                     "현재 진입 조건을 만족하는 "
                     "후보가 없습니다."
                 )
-
             else:
                 st.dataframe(
                     candidate_dataframe,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "5분 변동률": st.column_config.NumberColumn(
-                            format="%+.3f%%"
+                        "5분 변동률": (
+                            st.column_config.NumberColumn(
+                                format="%+.3f%%"
+                            )
                         ),
-                        "거래량 배수": st.column_config.NumberColumn(
-                            format="%.2f배"
+                        "거래량 배수": (
+                            st.column_config.NumberColumn(
+                                format="%.2f배"
+                            )
                         ),
-                        "RSI": st.column_config.NumberColumn(
-                            format="%.1f"
+                        "RSI": (
+                            st.column_config.NumberColumn(
+                                format="%.1f"
+                            )
                         ),
-                        "24시간 변동률": st.column_config.NumberColumn(
-                            format="%+.2f%%"
+                        "24시간 변동률": (
+                            st.column_config.NumberColumn(
+                                format="%+.2f%%"
+                            )
                         ),
                     },
                 )
 
     # ----------------------------------------------
-    # 현재 포지션
+    # 실시간 포지션
     # ----------------------------------------------
 
     with position_tab:
-        st.subheader("현재 가상 포지션")
-
-        positions_dataframe = (
-            create_positions_dataframe(
-                positions
-            )
-        )
-
-        if positions_dataframe.empty:
-            st.info(
-                "현재 보유 중인 포지션이 없습니다."
-            )
-
-        else:
-            st.dataframe(
-                positions_dataframe,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.caption(
-            "포지션 데이터는 state.json에서 "
-            "불러옵니다."
-        )
+        live_position_section()
 
     # ----------------------------------------------
     # 거래 기록
