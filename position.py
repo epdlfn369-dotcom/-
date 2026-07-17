@@ -18,109 +18,129 @@ balance, positions = load_state(
 )
 
 
-def open_position(candidate):
-    global balance
+# ==================================================
+# 공통 계산
+# ==================================================
 
-    trading_status = get_trading_status()
-
-    if not trading_status["can_trade"]:
-        print(
-            "신규 진입 중단: "
-            f"{trading_status['reason']}"
-        )
-        return False
-
-    symbol = candidate["symbol"]
-    side = candidate["side"]
-
-    # 이미 보유 중인 종목
-    if symbol in positions:
-        print(
-            f"{symbol}: 이미 보유 중이라 "
-            "추가 진입하지 않습니다."
-        )
-        return False
-
-    # 청산 후 재진입 대기
-    if is_in_cooldown(symbol):
-        remaining_seconds = (
-            get_remaining_seconds(symbol)
-        )
-
-        print(
-            f"{symbol}: 재진입 대기 중 "
-            f"({format_remaining_time(remaining_seconds)} 남음)"
-        )
-        return False
-
-    # 최대 포지션 제한
-    if len(positions) >= config.MAX_POSITIONS:
-        print(
-            "최대 포지션 개수에 "
-            "도달했습니다."
-        )
-        return False
-
-    current_price = get_current_price(
-        symbol
-    )
-
-    investment = (
-        balance
-        * config.POSITION_SIZE_PERCENT
-        / 100
-    )
-
-    positions[symbol] = {
-        "symbol": symbol,
-        "side": side,
-        "entry_price": current_price,
-        "investment": investment,
-        "score": candidate["score"],
-        "reasons": candidate.get(
-            "reasons",
-            [],
+def clamp(
+    value,
+    minimum,
+    maximum,
+):
+    return max(
+        minimum,
+        min(
+            value,
+            maximum,
         ),
-        "opened_at": datetime.now(),
-    }
-
-    save_state(
-        balance,
-        positions,
     )
 
-    print()
-    print("🚀 가상 포지션 진입")
-    print(f"종목: {symbol}")
-    print(f"방향: {side}")
-    print(f"점수: {candidate['score']}점")
-    print(
-        f"진입가: "
-        f"{current_price:,.8f} USDT"
-    )
-    print(
-        f"가상 투입금: "
-        f"{investment:,.0f}원"
-    )
-    print(
-        f"왕복 수수료 가정: "
-        f"{config.ROUND_TRIP_FEE_PERCENT}%"
-    )
 
-    reasons = candidate.get(
-        "reasons",
-        [],
-    )
-
-    if reasons:
-        print(
-            "진입 이유: "
-            + ", ".join(reasons)
+def calculate_exit_percentages(
+    candidate,
+):
+    if config.EXIT_MODE == "FIXED":
+        return (
+            config.STOP_LOSS_PERCENT,
+            config.TAKE_PROFIT_PERCENT,
         )
 
-    print()
+    atr_percent = float(
+        candidate.get(
+            "atr_percent",
+            0,
+        )
+    )
 
-    return True
+    if atr_percent <= 0:
+        print(
+            "ATR 값이 없어 고정 손절·익절을 사용합니다."
+        )
+
+        return (
+            config.STOP_LOSS_PERCENT,
+            config.TAKE_PROFIT_PERCENT,
+        )
+
+    stop_percent = (
+        atr_percent
+        * config.ATR_STOP_MULTIPLIER
+    )
+
+    take_profit_percent = (
+        atr_percent
+        * config.ATR_TAKE_PROFIT_MULTIPLIER
+    )
+
+    stop_percent = clamp(
+        stop_percent,
+        config.MINIMUM_STOP_PERCENT,
+        config.MAXIMUM_STOP_PERCENT,
+    )
+
+    take_profit_percent = clamp(
+        take_profit_percent,
+        config.MINIMUM_TAKE_PROFIT_PERCENT,
+        config.MAXIMUM_TAKE_PROFIT_PERCENT,
+    )
+
+    return (
+        stop_percent,
+        take_profit_percent,
+    )
+
+
+def calculate_exit_prices(
+    side,
+    entry_price,
+    stop_percent,
+    take_profit_percent,
+):
+    if side == "LONG":
+        stop_price = (
+            entry_price
+            * (
+                1
+                - stop_percent / 100
+            )
+        )
+
+        target_price = (
+            entry_price
+            * (
+                1
+                + take_profit_percent
+                / 100
+            )
+        )
+
+    elif side == "SHORT":
+        stop_price = (
+            entry_price
+            * (
+                1
+                + stop_percent / 100
+            )
+        )
+
+        target_price = (
+            entry_price
+            * (
+                1
+                - take_profit_percent
+                / 100
+            )
+        )
+
+    else:
+        raise ValueError(
+            f"지원하지 않는 방향: {side}"
+        )
+
+    return (
+        stop_price,
+        target_price,
+    )
 
 
 def calculate_gross_profit_percent(
@@ -170,6 +190,249 @@ def calculate_net_profit_percent(
     )
 
 
+# ==================================================
+# 기존 포지션 호환
+# ==================================================
+
+def ensure_exit_data(
+    symbol,
+    position_data,
+):
+    required_keys = {
+        "stop_price",
+        "target_price",
+        "stop_percent",
+        "take_profit_percent",
+    }
+
+    if required_keys.issubset(
+        position_data.keys()
+    ):
+        return False
+
+    entry_price = float(
+        position_data["entry_price"]
+    )
+
+    side = position_data["side"]
+
+    # 예전 포지션에는 ATR 값이 없으므로
+    # 고정 손절·익절을 사용
+    stop_percent = (
+        config.STOP_LOSS_PERCENT
+    )
+
+    take_profit_percent = (
+        config.TAKE_PROFIT_PERCENT
+    )
+
+    stop_price, target_price = (
+        calculate_exit_prices(
+            side=side,
+            entry_price=entry_price,
+            stop_percent=stop_percent,
+            take_profit_percent=(
+                take_profit_percent
+            ),
+        )
+    )
+
+    position_data.update(
+        {
+            "exit_mode": "FIXED_LEGACY",
+            "stop_percent": stop_percent,
+            "take_profit_percent": (
+                take_profit_percent
+            ),
+            "stop_price": stop_price,
+            "target_price": target_price,
+        }
+    )
+
+    positions[symbol] = position_data
+
+    return True
+
+
+# ==================================================
+# 진입
+# ==================================================
+
+def open_position(candidate):
+    global balance
+
+    trading_status = (
+        get_trading_status()
+    )
+
+    if not trading_status["can_trade"]:
+        print(
+            "신규 진입 중단: "
+            f"{trading_status['reason']}"
+        )
+        return False
+
+    symbol = candidate["symbol"]
+    side = candidate["side"]
+
+    if symbol in positions:
+        print(
+            f"{symbol}: 이미 보유 중"
+        )
+        return False
+
+    if is_in_cooldown(symbol):
+        remaining_seconds = (
+            get_remaining_seconds(
+                symbol
+            )
+        )
+
+        print(
+            f"{symbol}: 재진입 대기 중 "
+            f"({format_remaining_time(remaining_seconds)})"
+        )
+        return False
+
+    if (
+        len(positions)
+        >= config.MAX_POSITIONS
+    ):
+        print(
+            "최대 포지션 개수에 "
+            "도달했습니다."
+        )
+        return False
+
+    current_price = float(
+        get_current_price(
+            symbol
+        )
+    )
+
+    investment = (
+        balance
+        * config.POSITION_SIZE_PERCENT
+        / 100
+    )
+
+    (
+        stop_percent,
+        take_profit_percent,
+    ) = calculate_exit_percentages(
+        candidate
+    )
+
+    (
+        stop_price,
+        target_price,
+    ) = calculate_exit_prices(
+        side=side,
+        entry_price=current_price,
+        stop_percent=stop_percent,
+        take_profit_percent=(
+            take_profit_percent
+        ),
+    )
+
+    positions[symbol] = {
+        "symbol": symbol,
+        "side": side,
+        "entry_price": current_price,
+        "investment": investment,
+        "score": candidate["score"],
+        "reasons": candidate.get(
+            "reasons",
+            [],
+        ),
+        "atr": float(
+            candidate.get(
+                "atr",
+                0,
+            )
+        ),
+        "atr_percent": float(
+            candidate.get(
+                "atr_percent",
+                0,
+            )
+        ),
+        "exit_mode": config.EXIT_MODE,
+        "stop_percent": stop_percent,
+        "take_profit_percent": (
+            take_profit_percent
+        ),
+        "stop_price": stop_price,
+        "target_price": target_price,
+        "opened_at": datetime.now(),
+    }
+
+    save_state(
+        balance,
+        positions,
+    )
+
+    print()
+    print("🚀 가상 포지션 진입")
+    print(f"종목: {symbol}")
+    print(f"방향: {side}")
+    print(
+        f"점수: "
+        f"{candidate['score']}점"
+    )
+    print(
+        f"진입가: "
+        f"{current_price:,.8f}"
+    )
+    print(
+        f"투입금: "
+        f"{investment:,.0f}원"
+    )
+    print(
+        f"청산 방식: "
+        f"{config.EXIT_MODE}"
+    )
+    print(
+        f"ATR: "
+        f"{candidate.get('atr_percent', 0):.3f}%"
+    )
+    print(
+        f"손절 폭: "
+        f"-{stop_percent:.3f}%"
+    )
+    print(
+        f"손절가: "
+        f"{stop_price:,.8f}"
+    )
+    print(
+        f"익절 폭: "
+        f"+{take_profit_percent:.3f}%"
+    )
+    print(
+        f"익절가: "
+        f"{target_price:,.8f}"
+    )
+
+    reasons = candidate.get(
+        "reasons",
+        [],
+    )
+
+    if reasons:
+        print(
+            "진입 이유: "
+            + ", ".join(reasons)
+        )
+
+    print()
+
+    return True
+
+
+# ==================================================
+# 청산
+# ==================================================
+
 def close_position(
     symbol,
     current_price,
@@ -180,7 +443,9 @@ def close_position(
     if symbol not in positions:
         return
 
-    position_data = positions[symbol]
+    position_data = positions[
+        symbol
+    ]
 
     gross_percent = (
         calculate_gross_profit_percent(
@@ -197,7 +462,9 @@ def close_position(
     )
 
     profit_amount = (
-        float(position_data["investment"])
+        float(
+            position_data["investment"]
+        )
         * net_percent
         / 100
     )
@@ -219,7 +486,9 @@ def close_position(
         f"청산가: "
         f"{current_price:,.8f}"
     )
-    print(f"청산 이유: {reason}")
+    print(
+        f"청산 이유: {reason}"
+    )
     print(
         f"가격 수익률: "
         f"{gross_percent:+.3f}%"
@@ -233,7 +502,7 @@ def close_position(
         f"{profit_amount:+,.0f}원"
     )
     print(
-        f"현재 가상잔고: "
+        f"현재 잔고: "
         f"{balance:,.0f}원"
     )
 
@@ -262,38 +531,46 @@ def close_position(
         positions,
     )
 
-    # 청산 직후 재진입 방지
     start_cooldown(symbol)
 
-    remaining_seconds = (
-        get_remaining_seconds(symbol)
-    )
-
     print(
-        f"{symbol} 재진입 대기 시작: "
-        f"{format_remaining_time(remaining_seconds)}"
+        f"{symbol} 재진입 대기 시작"
     )
     print()
 
 
+# ==================================================
+# 포지션 감시
+# ==================================================
+
 def monitor_positions():
     if not positions:
-        print("현재 보유 포지션 없음")
+        print(
+            "현재 보유 포지션 없음"
+        )
         return
 
-    symbols = list(
+    state_changed = False
+
+    for symbol in list(
         positions.keys()
-    )
-
-    for symbol in symbols:
+    ):
         try:
-            current_price = (
-                get_current_price(symbol)
-            )
-
             position_data = positions[
                 symbol
             ]
+
+            if ensure_exit_data(
+                symbol,
+                position_data,
+            ):
+                state_changed = True
+
+            current_price = float(
+                get_current_price(
+                    symbol
+                )
+            )
 
             gross_percent = (
                 calculate_gross_profit_percent(
@@ -319,56 +596,99 @@ def monitor_positions():
                 / 100
             )
 
-            print(
-                f"[보유] {symbol:<12} "
-                f"{position_data['side']:<5} | "
-                f"현재가 {current_price:,.8f} | "
-                f"가격 {gross_percent:+.3f}% | "
-                f"수수료반영 {net_percent:+.3f}% | "
-                f"{unrealized_profit:+,.0f}원"
+            stop_price = float(
+                position_data[
+                    "stop_price"
+                ]
             )
 
-            # 손절과 익절은 가격 움직임 기준
-            if (
-                gross_percent
-                <= -config.STOP_LOSS_PERCENT
-            ):
-                close_position(
-                    symbol=symbol,
-                    current_price=current_price,
-                    reason=(
-                        f"손절 "
-                        f"-{config.STOP_LOSS_PERCENT}%"
-                    ),
-                )
+            target_price = float(
+                position_data[
+                    "target_price"
+                ]
+            )
 
-            elif (
-                gross_percent
-                >= config.TAKE_PROFIT_PERCENT
-            ):
-                close_position(
-                    symbol=symbol,
-                    current_price=current_price,
-                    reason=(
-                        f"익절 "
-                        f"+{config.TAKE_PROFIT_PERCENT}%"
-                    ),
-                )
+            print(
+                f"[보유] {symbol:<14} "
+                f"{position_data['side']:<5} | "
+                f"현재 {current_price:,.8f} | "
+                f"{net_percent:+.3f}% | "
+                f"{unrealized_profit:+,.0f}원 | "
+                f"SL {stop_price:,.8f} | "
+                f"TP {target_price:,.8f}"
+            )
+
+            side = position_data["side"]
+
+            if side == "LONG":
+                if current_price <= stop_price:
+                    close_position(
+                        symbol=symbol,
+                        current_price=current_price,
+                        reason=(
+                            f"손절 "
+                            f"-{position_data['stop_percent']:.3f}%"
+                        ),
+                    )
+
+                elif current_price >= target_price:
+                    close_position(
+                        symbol=symbol,
+                        current_price=current_price,
+                        reason=(
+                            f"익절 "
+                            f"+{position_data['take_profit_percent']:.3f}%"
+                        ),
+                    )
+
+            elif side == "SHORT":
+                if current_price >= stop_price:
+                    close_position(
+                        symbol=symbol,
+                        current_price=current_price,
+                        reason=(
+                            f"손절 "
+                            f"-{position_data['stop_percent']:.3f}%"
+                        ),
+                    )
+
+                elif current_price <= target_price:
+                    close_position(
+                        symbol=symbol,
+                        current_price=current_price,
+                        reason=(
+                            f"익절 "
+                            f"+{position_data['take_profit_percent']:.3f}%"
+                        ),
+                    )
 
         except Exception as error:
             print(
-                f"{symbol} 가격 확인 오류: "
+                f"{symbol} 감시 오류: "
                 f"{repr(error)}"
             )
 
+    if state_changed:
+        save_state(
+            balance,
+            positions,
+        )
 
-def open_top_candidates(candidates):
-    trading_status = get_trading_status()
+
+# ==================================================
+# 후보 진입
+# ==================================================
+
+def open_top_candidates(
+    candidates,
+):
+    trading_status = (
+        get_trading_status()
+    )
 
     if not trading_status["can_trade"]:
-        print()
         print(
-            "⛔ 오늘 신규 진입이 "
+            "오늘 신규 진입이 "
             "중단됐습니다."
         )
         print(
@@ -383,7 +703,7 @@ def open_top_candidates(candidates):
 
     if available_slots <= 0:
         print(
-            "최대 포지션 개수에 "
+            "최대 포지션에 "
             "도달했습니다."
         )
         return
@@ -391,7 +711,10 @@ def open_top_candidates(candidates):
     opened_count = 0
 
     for candidate in candidates:
-        if opened_count >= available_slots:
+        if (
+            opened_count
+            >= available_slots
+        ):
             break
 
         if open_position(candidate):
@@ -401,16 +724,17 @@ def open_top_candidates(candidates):
         print(
             "새롭게 진입한 포지션이 없습니다."
         )
+
     else:
         print(
             f"신규 포지션 "
-            f"{opened_count}개 진입 완료"
+            f"{opened_count}개 진입"
         )
 
 
 def print_account_status():
     print()
-    print("=" * 70)
+    print("=" * 85)
     print(
         f"가상잔고: "
         f"{balance:,.0f}원"
@@ -421,16 +745,18 @@ def print_account_status():
         f"{config.MAX_POSITIONS}"
     )
 
-    for symbol, position_data in (
+    for symbol, data in (
         positions.items()
     ):
         print(
-            f"- {symbol:<12} "
-            f"{position_data['side']:<5} | "
-            f"진입가 "
-            f"{position_data['entry_price']:,.8f} | "
-            f"투입금 "
-            f"{position_data['investment']:,.0f}원"
+            f"- {symbol:<14} "
+            f"{data['side']:<5} | "
+            f"진입 "
+            f"{data['entry_price']:,.8f} | "
+            f"SL "
+            f"{data.get('stop_price', 0):,.8f} | "
+            f"TP "
+            f"{data.get('target_price', 0):,.8f}"
         )
 
-    print("=" * 70)
+    print("=" * 85)

@@ -4,25 +4,19 @@ from datetime import datetime, timezone
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
+from ta.volatility import AverageTrueRange
 
 import config
 from binance_api import request_json
 
 
-# ==================================================
-# 시장 분석 설정
-# ==================================================
-
 MOMENTUM_MINUTES = 5
 REQUEST_DELAY_SECONDS = 0.08
 
-# 상장한 지 최소 며칠 지난 종목만 분석
 MIN_LISTING_DAYS = 30
-
-# 24시간 급등·급락 종목 제외 기준
 MAX_ABSOLUTE_24H_CHANGE = 20.0
 
-# 스테이블코인·법정화폐 계열 제외
+
 EXCLUDED_BASE_ASSETS = {
     "USDC",
     "FDUSD",
@@ -44,11 +38,6 @@ EXCLUDED_BASE_ASSETS = {
 # ==================================================
 
 def get_symbol_information():
-    """
-    거래 가능한 USDT 무기한 선물 종목 정보를 가져온다.
-    신규 상장 종목과 제외 자산을 필터링한다.
-    """
-
     data = request_json(
         "/fapi/v1/exchangeInfo"
     )
@@ -69,7 +58,10 @@ def get_symbol_information():
 
     symbols = {}
 
-    for item in data.get("symbols", []):
+    for item in data.get(
+        "symbols",
+        [],
+    ):
         if item.get("status") != "TRADING":
             continue
 
@@ -80,7 +72,10 @@ def get_symbol_information():
             continue
 
         symbol = item.get("symbol")
-        base_asset = item.get("baseAsset", "")
+        base_asset = item.get(
+            "baseAsset",
+            "",
+        )
 
         if not symbol:
             continue
@@ -90,12 +85,17 @@ def get_symbol_information():
 
         try:
             onboard_date = int(
-                item.get("onboardDate", 0)
+                item.get(
+                    "onboardDate",
+                    0,
+                )
             )
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
             onboard_date = 0
 
-        # 상장일 정보가 있고 30일 미만이면 제외
         if onboard_date > 0:
             listing_age = (
                 current_time_ms
@@ -119,22 +119,21 @@ def get_symbol_information():
 # ==================================================
 
 def get_top_volume_symbols():
-    valid_symbols = get_symbol_information()
+    valid_symbols = (
+        get_symbol_information()
+    )
 
     tickers = request_json(
         "/fapi/v1/ticker/24hr"
     )
 
     ranked = []
-
-    excluded_new = 0
     excluded_extreme = 0
 
     for ticker in tickers:
         symbol = ticker.get("symbol")
 
         if symbol not in valid_symbols:
-            excluded_new += 1
             continue
 
         try:
@@ -158,7 +157,6 @@ def get_top_volume_symbols():
         ):
             continue
 
-        # 24시간 급등·급락 과열 종목 제외
         if (
             abs(price_change)
             >= MAX_ABSOLUTE_24H_CHANGE
@@ -171,9 +169,6 @@ def get_top_volume_symbols():
                 "symbol": symbol,
                 "quote_volume": quote_volume,
                 "price_change_24h": price_change,
-                "base_asset": valid_symbols[
-                    symbol
-                ]["base_asset"],
             }
         )
 
@@ -189,20 +184,17 @@ def get_top_volume_symbols():
     ]
 
     print(
-        f"안전 필터 통과 종목: "
+        f"안전 필터 통과: "
         f"{len(ranked)}개"
     )
 
     print(
-        f"24시간 ±"
-        f"{MAX_ABSOLUTE_24H_CHANGE:.0f}% "
-        f"과열 제외: "
+        f"급등락 제외: "
         f"{excluded_extreme}개"
     )
 
     print(
         f"분석 대상: "
-        f"거래대금 상위 "
         f"{len(selected)}개"
     )
 
@@ -210,12 +202,12 @@ def get_top_volume_symbols():
 
 
 # ==================================================
-# 캔들 데이터
+# 캔들
 # ==================================================
 
 def get_closed_candles(
     symbol,
-    limit=100,
+    limit=120,
 ):
     candles = request_json(
         "/fapi/v1/klines",
@@ -226,12 +218,12 @@ def get_closed_candles(
         },
     )
 
-    # 아직 진행 중인 마지막 1분봉 제외
+    # 진행 중인 마지막 봉 제외
     return candles[:-1]
 
 
 # ==================================================
-# 계산 함수
+# 계산
 # ==================================================
 
 def calculate_percent_change(
@@ -248,7 +240,9 @@ def calculate_percent_change(
     )
 
 
-def calculate_volume_ratio(volumes):
+def calculate_volume_ratio(
+    volumes,
+):
     if len(volumes) < 6:
         return 0.0
 
@@ -263,7 +257,7 @@ def calculate_volume_ratio(volumes):
         / len(previous_volumes)
     )
 
-    if average_volume == 0:
+    if average_volume <= 0:
         return 0.0
 
     return (
@@ -272,9 +266,15 @@ def calculate_volume_ratio(volumes):
     )
 
 
-def calculate_indicators(closes):
+def calculate_indicators(
+    highs,
+    lows,
+    closes,
+):
     dataframe = pd.DataFrame(
         {
+            "high": highs,
+            "low": lows,
             "close": closes,
         }
     )
@@ -294,7 +294,31 @@ def calculate_indicators(closes):
         window=14,
     ).rsi()
 
+    dataframe["atr"] = AverageTrueRange(
+        high=dataframe["high"],
+        low=dataframe["low"],
+        close=dataframe["close"],
+        window=14,
+    ).average_true_range()
+
     latest = dataframe.iloc[-1]
+
+    close_price = float(
+        latest["close"]
+    )
+
+    atr_value = float(
+        latest["atr"]
+    )
+
+    if close_price <= 0:
+        atr_percent = 0.0
+    else:
+        atr_percent = (
+            atr_value
+            / close_price
+            * 100
+        )
 
     return {
         "ema20": float(
@@ -306,6 +330,8 @@ def calculate_indicators(closes):
         "rsi": float(
             latest["rsi"]
         ),
+        "atr": atr_value,
+        "atr_percent": atr_percent,
     }
 
 
@@ -316,11 +342,21 @@ def calculate_indicators(closes):
 def analyze_symbol(symbol):
     candles = get_closed_candles(
         symbol=symbol,
-        limit=100,
+        limit=120,
     )
 
     if len(candles) < 60:
         return None
+
+    highs = [
+        float(candle[2])
+        for candle in candles
+    ]
+
+    lows = [
+        float(candle[3])
+        for candle in candles
+    ]
 
     closes = [
         float(candle[4])
@@ -351,8 +387,12 @@ def analyze_symbol(symbol):
         )
     )
 
-    indicators = calculate_indicators(
-        closes
+    indicators = (
+        calculate_indicators(
+            highs,
+            lows,
+            closes,
+        )
     )
 
     return {
@@ -363,35 +403,37 @@ def analyze_symbol(symbol):
         "ema20": indicators["ema20"],
         "ema50": indicators["ema50"],
         "rsi": indicators["rsi"],
+        "atr": indicators["atr"],
+        "atr_percent": (
+            indicators["atr_percent"]
+        ),
     }
 
 
 # ==================================================
-# 전체 시장 스캔
+# 시장 스캔
 # ==================================================
 
 def scan_market():
     print()
-    print("=" * 75)
-    print("안전 필터 적용 시장 스캔")
-    print("=" * 75)
+    print("=" * 80)
+    print("EMA + RSI + ATR 시장 스캔")
+    print("=" * 80)
 
     print(
-        f"최소 상장 기간: "
-        f"{MIN_LISTING_DAYS}일"
-    )
-
-    print(
-        f"24시간 과열 제외: "
-        f"±{MAX_ABSOLUTE_24H_CHANGE}% 이상"
+        f"청산 방식: "
+        f"{config.EXIT_MODE}"
     )
 
     print(
         f"최소 진입 점수: "
-        f"{config.MINIMUM_ENTRY_SCORE}점"
+        f"{config.MINIMUM_ENTRY_SCORE}"
     )
 
-    top_symbols = get_top_volume_symbols()
+    top_symbols = (
+        get_top_volume_symbols()
+    )
+
     results = []
 
     print()
@@ -407,41 +449,43 @@ def scan_market():
                 symbol
             )
 
-            if result is not None:
-                result[
-                    "price_change_24h"
-                ] = item[
-                    "price_change_24h"
-                ]
+            if result is None:
+                continue
 
-                result[
-                    "quote_volume"
-                ] = item[
-                    "quote_volume"
-                ]
+            result[
+                "price_change_24h"
+            ] = item[
+                "price_change_24h"
+            ]
 
-                results.append(result)
+            result[
+                "quote_volume"
+            ] = item[
+                "quote_volume"
+            ]
 
-                trend = (
-                    "상승"
-                    if result["ema20"]
-                    > result["ema50"]
-                    else "하락"
-                )
+            results.append(result)
 
-                print(
-                    f"{index:>2}/"
-                    f"{len(top_symbols)} "
-                    f"{symbol:<14} "
-                    f"{trend} | "
-                    f"5분 "
-                    f"{result['move_5m']:+.3f}% | "
-                    f"24시간 "
-                    f"{result['price_change_24h']:+.2f}% | "
-                    f"RSI "
-                    f"{result['rsi']:.1f}",
-                    flush=True,
-                )
+            trend = (
+                "상승"
+                if result["ema20"]
+                > result["ema50"]
+                else "하락"
+            )
+
+            print(
+                f"{index:>2}/"
+                f"{len(top_symbols)} "
+                f"{symbol:<14} "
+                f"{trend} | "
+                f"5분 "
+                f"{result['move_5m']:+.3f}% | "
+                f"RSI "
+                f"{result['rsi']:.1f} | "
+                f"ATR "
+                f"{result['atr_percent']:.3f}%",
+                flush=True,
+            )
 
         except Exception as error:
             print(
@@ -456,10 +500,6 @@ def scan_market():
 
     return results
 
-
-# ==================================================
-# 순위 출력
-# ==================================================
 
 def print_rankings(results):
     rising = sorted(
@@ -479,7 +519,7 @@ def print_rankings(results):
 
     print()
     print("최근 5분 상승률 상위")
-    print("-" * 80)
+    print("-" * 85)
 
     for item in rising[:5]:
         print(
@@ -488,13 +528,13 @@ def print_rankings(results):
             f"거래량 "
             f"{item['volume_ratio']:.2f}배 | "
             f"RSI {item['rsi']:.1f} | "
-            f"24시간 "
-            f"{item['price_change_24h']:+.2f}%"
+            f"ATR "
+            f"{item['atr_percent']:.3f}%"
         )
 
     print()
     print("최근 5분 하락률 상위")
-    print("-" * 80)
+    print("-" * 85)
 
     for item in falling[:5]:
         print(
@@ -503,14 +543,10 @@ def print_rankings(results):
             f"거래량 "
             f"{item['volume_ratio']:.2f}배 | "
             f"RSI {item['rsi']:.1f} | "
-            f"24시간 "
-            f"{item['price_change_24h']:+.2f}%"
+            f"ATR "
+            f"{item['atr_percent']:.3f}%"
         )
 
-
-# ==================================================
-# 단독 실행
-# ==================================================
 
 if __name__ == "__main__":
     from strategy import (
