@@ -1,24 +1,125 @@
 import time
+from datetime import datetime, timezone
 
 import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 
 import config
-from binance_api import (
-    get_usdt_perpetual_symbols,
-    request_json,
-)
+from binance_api import request_json
 
+
+# ==================================================
+# 시장 분석 설정
+# ==================================================
 
 MOMENTUM_MINUTES = 5
 REQUEST_DELAY_SECONDS = 0.08
 
+# 상장한 지 최소 며칠 지난 종목만 분석
+MIN_LISTING_DAYS = 30
+
+# 24시간 급등·급락 종목 제외 기준
+MAX_ABSOLUTE_24H_CHANGE = 20.0
+
+# 스테이블코인·법정화폐 계열 제외
+EXCLUDED_BASE_ASSETS = {
+    "USDC",
+    "FDUSD",
+    "TUSD",
+    "USDP",
+    "DAI",
+    "USDS",
+    "EUR",
+    "TRY",
+    "BRL",
+    "GBP",
+    "AUD",
+    "JPY",
+}
+
+
+# ==================================================
+# 종목 정보
+# ==================================================
+
+def get_symbol_information():
+    """
+    거래 가능한 USDT 무기한 선물 종목 정보를 가져온다.
+    신규 상장 종목과 제외 자산을 필터링한다.
+    """
+
+    data = request_json(
+        "/fapi/v1/exchangeInfo"
+    )
+
+    current_time_ms = int(
+        datetime.now(
+            timezone.utc
+        ).timestamp() * 1000
+    )
+
+    minimum_age_ms = (
+        MIN_LISTING_DAYS
+        * 24
+        * 60
+        * 60
+        * 1000
+    )
+
+    symbols = {}
+
+    for item in data.get("symbols", []):
+        if item.get("status") != "TRADING":
+            continue
+
+        if item.get("quoteAsset") != "USDT":
+            continue
+
+        if item.get("contractType") != "PERPETUAL":
+            continue
+
+        symbol = item.get("symbol")
+        base_asset = item.get("baseAsset", "")
+
+        if not symbol:
+            continue
+
+        if base_asset in EXCLUDED_BASE_ASSETS:
+            continue
+
+        try:
+            onboard_date = int(
+                item.get("onboardDate", 0)
+            )
+        except (TypeError, ValueError):
+            onboard_date = 0
+
+        # 상장일 정보가 있고 30일 미만이면 제외
+        if onboard_date > 0:
+            listing_age = (
+                current_time_ms
+                - onboard_date
+            )
+
+            if listing_age < minimum_age_ms:
+                continue
+
+        symbols[symbol] = {
+            "symbol": symbol,
+            "base_asset": base_asset,
+            "onboard_date": onboard_date,
+        }
+
+    return symbols
+
+
+# ==================================================
+# 거래대금 상위 종목
+# ==================================================
 
 def get_top_volume_symbols():
-    valid_symbols = set(
-        get_usdt_perpetual_symbols()
-    )
+    valid_symbols = get_symbol_information()
 
     tickers = request_json(
         "/fapi/v1/ticker/24hr"
@@ -26,10 +127,14 @@ def get_top_volume_symbols():
 
     ranked = []
 
+    excluded_new = 0
+    excluded_extreme = 0
+
     for ticker in tickers:
         symbol = ticker.get("symbol")
 
         if symbol not in valid_symbols:
+            excluded_new += 1
             continue
 
         try:
@@ -53,11 +158,22 @@ def get_top_volume_symbols():
         ):
             continue
 
+        # 24시간 급등·급락 과열 종목 제외
+        if (
+            abs(price_change)
+            >= MAX_ABSOLUTE_24H_CHANGE
+        ):
+            excluded_extreme += 1
+            continue
+
         ranked.append(
             {
                 "symbol": symbol,
                 "quote_volume": quote_volume,
                 "price_change_24h": price_change,
+                "base_asset": valid_symbols[
+                    symbol
+                ]["base_asset"],
             }
         )
 
@@ -68,10 +184,34 @@ def get_top_volume_symbols():
         reverse=True,
     )
 
-    return ranked[
+    selected = ranked[
         :config.TOP_VOLUME_SYMBOLS
     ]
 
+    print(
+        f"안전 필터 통과 종목: "
+        f"{len(ranked)}개"
+    )
+
+    print(
+        f"24시간 ±"
+        f"{MAX_ABSOLUTE_24H_CHANGE:.0f}% "
+        f"과열 제외: "
+        f"{excluded_extreme}개"
+    )
+
+    print(
+        f"분석 대상: "
+        f"거래대금 상위 "
+        f"{len(selected)}개"
+    )
+
+    return selected
+
+
+# ==================================================
+# 캔들 데이터
+# ==================================================
 
 def get_closed_candles(
     symbol,
@@ -86,9 +226,13 @@ def get_closed_candles(
         },
     )
 
-    # 진행 중인 마지막 1분봉 제외
+    # 아직 진행 중인 마지막 1분봉 제외
     return candles[:-1]
 
+
+# ==================================================
+# 계산 함수
+# ==================================================
 
 def calculate_percent_change(
     old_price,
@@ -165,6 +309,10 @@ def calculate_indicators(closes):
     }
 
 
+# ==================================================
+# 개별 종목 분석
+# ==================================================
+
 def analyze_symbol(symbol):
     candles = get_closed_candles(
         symbol=symbol,
@@ -218,20 +366,33 @@ def analyze_symbol(symbol):
     }
 
 
+# ==================================================
+# 전체 시장 스캔
+# ==================================================
+
 def scan_market():
+    print()
+    print("=" * 75)
+    print("안전 필터 적용 시장 스캔")
+    print("=" * 75)
+
+    print(
+        f"최소 상장 기간: "
+        f"{MIN_LISTING_DAYS}일"
+    )
+
+    print(
+        f"24시간 과열 제외: "
+        f"±{MAX_ABSOLUTE_24H_CHANGE}% 이상"
+    )
+
+    print(
+        f"최소 진입 점수: "
+        f"{config.MINIMUM_ENTRY_SCORE}점"
+    )
+
     top_symbols = get_top_volume_symbols()
     results = []
-
-    print()
-    print(
-        f"거래대금 상위 "
-        f"{len(top_symbols)}개 분석 중..."
-    )
-
-    print(
-        f"웹 설정 최소 진입 점수: "
-        f"{config.MINIMUM_ENTRY_SCORE}"
-    )
 
     print()
 
@@ -253,6 +414,12 @@ def scan_market():
                     "price_change_24h"
                 ]
 
+                result[
+                    "quote_volume"
+                ] = item[
+                    "quote_volume"
+                ]
+
                 results.append(result)
 
                 trend = (
@@ -265,10 +432,12 @@ def scan_market():
                 print(
                     f"{index:>2}/"
                     f"{len(top_symbols)} "
-                    f"{symbol:<12} "
+                    f"{symbol:<14} "
                     f"{trend} | "
                     f"5분 "
                     f"{result['move_5m']:+.3f}% | "
+                    f"24시간 "
+                    f"{result['price_change_24h']:+.2f}% | "
                     f"RSI "
                     f"{result['rsi']:.1f}",
                     flush=True,
@@ -277,7 +446,7 @@ def scan_market():
         except Exception as error:
             print(
                 f"{symbol} 분석 실패: "
-                f"{error}",
+                f"{repr(error)}",
                 flush=True,
             )
 
@@ -288,44 +457,60 @@ def scan_market():
     return results
 
 
+# ==================================================
+# 순위 출력
+# ==================================================
+
 def print_rankings(results):
     rising = sorted(
         results,
-        key=lambda item: item["move_5m"],
+        key=lambda item: item[
+            "move_5m"
+        ],
         reverse=True,
     )
 
     falling = sorted(
         results,
-        key=lambda item: item["move_5m"],
+        key=lambda item: item[
+            "move_5m"
+        ],
     )
 
     print()
     print("최근 5분 상승률 상위")
-    print("-" * 75)
+    print("-" * 80)
 
     for item in rising[:5]:
         print(
-            f"{item['symbol']:<12} "
+            f"{item['symbol']:<14} "
             f"{item['move_5m']:+.3f}% | "
             f"거래량 "
             f"{item['volume_ratio']:.2f}배 | "
-            f"RSI {item['rsi']:.1f}"
+            f"RSI {item['rsi']:.1f} | "
+            f"24시간 "
+            f"{item['price_change_24h']:+.2f}%"
         )
 
     print()
     print("최근 5분 하락률 상위")
-    print("-" * 75)
+    print("-" * 80)
 
     for item in falling[:5]:
         print(
-            f"{item['symbol']:<12} "
+            f"{item['symbol']:<14} "
             f"{item['move_5m']:+.3f}% | "
             f"거래량 "
             f"{item['volume_ratio']:.2f}배 | "
-            f"RSI {item['rsi']:.1f}"
+            f"RSI {item['rsi']:.1f} | "
+            f"24시간 "
+            f"{item['price_change_24h']:+.2f}%"
         )
 
+
+# ==================================================
+# 단독 실행
+# ==================================================
 
 if __name__ == "__main__":
     from strategy import (
