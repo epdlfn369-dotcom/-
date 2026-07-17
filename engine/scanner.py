@@ -72,6 +72,7 @@ def get_symbol_information():
             continue
 
         symbol = item.get("symbol")
+
         base_asset = item.get(
             "baseAsset",
             "",
@@ -90,6 +91,7 @@ def get_symbol_information():
                     0,
                 )
             )
+
         except (
             TypeError,
             ValueError,
@@ -128,7 +130,9 @@ def get_top_volume_symbols():
     )
 
     ranked = []
+
     excluded_extreme = 0
+    excluded_low_volume = 0
 
     for ticker in tickers:
         symbol = ticker.get("symbol")
@@ -164,6 +168,14 @@ def get_top_volume_symbols():
             excluded_extreme += 1
             continue
 
+        if (
+            config.VOLUME_FILTER_ENABLED
+            and quote_volume
+            < config.MINIMUM_24H_QUOTE_VOLUME
+        ):
+            excluded_low_volume += 1
+            continue
+
         ranked.append(
             {
                 "symbol": symbol,
@@ -192,6 +204,18 @@ def get_top_volume_symbols():
         f"급등락 제외: "
         f"{excluded_extreme}개"
     )
+
+    if config.VOLUME_FILTER_ENABLED:
+        print(
+            f"거래대금 부족 제외: "
+            f"{excluded_low_volume}개"
+        )
+
+        print(
+            "최소 24시간 거래대금: "
+            f"{config.MINIMUM_24H_QUOTE_VOLUME:,.0f} "
+            "USDT"
+        )
 
     print(
         f"분석 대상: "
@@ -246,7 +270,9 @@ def calculate_volume_ratio(
     if len(volumes) < 6:
         return 0.0
 
-    latest_volume = volumes[-1]
+    latest_volume = float(
+        volumes[-1]
+    )
 
     previous_volumes = volumes[
         -6:-1
@@ -411,6 +437,29 @@ def analyze_symbol(symbol):
 
 
 # ==================================================
+# 거래량 필터
+# ==================================================
+
+def passes_recent_volume_filter(
+    result,
+):
+    if not config.VOLUME_FILTER_ENABLED:
+        return True
+
+    volume_ratio = float(
+        result.get(
+            "volume_ratio",
+            0,
+        )
+    )
+
+    return (
+        volume_ratio
+        >= config.MINIMUM_VOLUME_RATIO
+    )
+
+
+# ==================================================
 # 시장 스캔
 # ==================================================
 
@@ -430,11 +479,28 @@ def scan_market():
         f"{config.MINIMUM_ENTRY_SCORE}"
     )
 
+    print(
+        "거래량 필터: "
+        + (
+            "활성화"
+            if config.VOLUME_FILTER_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if config.VOLUME_FILTER_ENABLED:
+        print(
+            "최근 거래량 최소 비율: "
+            f"{config.MINIMUM_VOLUME_RATIO:.2f}배"
+        )
+
     top_symbols = (
         get_top_volume_symbols()
     )
 
     results = []
+
+    excluded_recent_volume = 0
 
     print()
 
@@ -464,6 +530,24 @@ def scan_market():
                 "quote_volume"
             ]
 
+            if not passes_recent_volume_filter(
+                result
+            ):
+                excluded_recent_volume += 1
+
+                print(
+                    f"{index:>2}/"
+                    f"{len(top_symbols)} "
+                    f"{symbol:<14} "
+                    f"거래량 부족 제외 | "
+                    f"{result['volume_ratio']:.2f}배 "
+                    f"< "
+                    f"{config.MINIMUM_VOLUME_RATIO:.2f}배",
+                    flush=True,
+                )
+
+                continue
+
             results.append(result)
 
             trend = (
@@ -480,6 +564,8 @@ def scan_market():
                 f"{trend} | "
                 f"5분 "
                 f"{result['move_5m']:+.3f}% | "
+                f"거래량 "
+                f"{result['volume_ratio']:.2f}배 | "
                 f"RSI "
                 f"{result['rsi']:.1f} | "
                 f"ATR "
@@ -496,6 +582,18 @@ def scan_market():
 
         time.sleep(
             REQUEST_DELAY_SECONDS
+        )
+
+    if config.VOLUME_FILTER_ENABLED:
+        print()
+        print(
+            "최근 거래량 부족 제외: "
+            f"{excluded_recent_volume}개"
+        )
+
+        print(
+            "최종 전략 분석 대상: "
+            f"{len(results)}개"
         )
 
     return results
@@ -549,7 +647,7 @@ def print_rankings(results):
 
 
 if __name__ == "__main__":
-    from strategy import (
+    from engine.strategy import (
         print_candidates,
         rank_candidates,
     )
