@@ -1,5 +1,5 @@
 {
-  "balance": 1000000.0,
+  "balance": 998753.711790393,
   "positions": {
     "ZECUSDT": {
       "symbol": "ZECUSDT",
@@ -9,14 +9,6 @@
       "score": 35,
       "opened_at": "2026-07-17T15:34:33.987997"
     },
-    "ONDOUSDT": {
-      "symbol": "ONDOUSDT",
-      "side": "LONG",
-      "entry_price": 0.3664,
-      "investment": 100000.0,
-      "score": 30,
-      "opened_at": "2026-07-17T15:34:34.067144"
-    },
     "BNBUSDT": {
       "symbol": "BNBUSDT",
       "side": "SHORT",
@@ -24,7 +16,15 @@
       "investment": 100000.0,
       "score": 30,
       "opened_at": "2026-07-17T15:34:34.137231"
+    },
+    "DOGEUSDT": {
+      "symbol": "DOGEUSDT",
+      "side": "SHORT",
+      "entry_price": 0.0716,
+      "investment": 99875.3711790393,
+      "score": 80,
+      "opened_at": "2026-07-17T16:24:38.390757"
     }
   },
-  "saved_at": "2026-07-17T15:34:34.137235"
+  "saved_at": "2026-07-17T16:24:38.390763"
 }

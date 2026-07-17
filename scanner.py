@@ -1,5 +1,9 @@
 import time
 
+import pandas as pd
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+
 from binance_api import (
     get_usdt_perpetual_symbols,
     request_json,
@@ -24,10 +28,14 @@ def get_top_volume_symbols():
             continue
 
         try:
-            quote_volume = float(ticker.get("quoteVolume", 0))
+            quote_volume = float(
+                ticker.get("quoteVolume", 0)
+            )
+
             price_change = float(
                 ticker.get("priceChangePercent", 0)
             )
+
         except (TypeError, ValueError):
             continue
 
@@ -47,7 +55,7 @@ def get_top_volume_symbols():
     return ranked[:TOP_COUNT]
 
 
-def get_closed_candles(symbol, limit=12):
+def get_closed_candles(symbol, limit=100):
     candles = request_json(
         "/fapi/v1/klines",
         {
@@ -57,7 +65,7 @@ def get_closed_candles(symbol, limit=12):
         },
     )
 
-    # 마지막 봉은 진행 중일 수 있으므로 제외
+    # 마지막 진행 중인 봉 제외
     return candles[:-1]
 
 
@@ -65,7 +73,11 @@ def calculate_percent_change(old_price, new_price):
     if old_price == 0:
         return 0.0
 
-    return ((new_price - old_price) / old_price) * 100
+    return (
+        (new_price - old_price)
+        / old_price
+        * 100
+    )
 
 
 def calculate_volume_ratio(volumes):
@@ -74,7 +86,11 @@ def calculate_volume_ratio(volumes):
 
     latest_volume = volumes[-1]
     previous_volumes = volumes[-6:-1]
-    average_volume = sum(previous_volumes) / len(previous_volumes)
+
+    average_volume = (
+        sum(previous_volumes)
+        / len(previous_volumes)
+    )
 
     if average_volume == 0:
         return 0.0
@@ -82,10 +98,44 @@ def calculate_volume_ratio(volumes):
     return latest_volume / average_volume
 
 
-def analyze_symbol(symbol):
-    candles = get_closed_candles(symbol)
+def calculate_indicators(closes):
+    dataframe = pd.DataFrame(
+        {
+            "close": closes,
+        }
+    )
 
-    if len(candles) < MOMENTUM_MINUTES + 6:
+    dataframe["ema20"] = EMAIndicator(
+        close=dataframe["close"],
+        window=20,
+    ).ema_indicator()
+
+    dataframe["ema50"] = EMAIndicator(
+        close=dataframe["close"],
+        window=50,
+    ).ema_indicator()
+
+    dataframe["rsi"] = RSIIndicator(
+        close=dataframe["close"],
+        window=14,
+    ).rsi()
+
+    latest = dataframe.iloc[-1]
+
+    return {
+        "ema20": float(latest["ema20"]),
+        "ema50": float(latest["ema50"]),
+        "rsi": float(latest["rsi"]),
+    }
+
+
+def analyze_symbol(symbol):
+    candles = get_closed_candles(
+        symbol=symbol,
+        limit=100,
+    )
+
+    if len(candles) < 60:
         return None
 
     closes = [
@@ -99,20 +149,32 @@ def analyze_symbol(symbol):
     ]
 
     current_price = closes[-1]
-    old_price = closes[-(MOMENTUM_MINUTES + 1)]
+
+    old_price = closes[
+        -(MOMENTUM_MINUTES + 1)
+    ]
 
     move_5m = calculate_percent_change(
         old_price,
         current_price,
     )
 
-    volume_ratio = calculate_volume_ratio(volumes)
+    volume_ratio = calculate_volume_ratio(
+        volumes
+    )
+
+    indicators = calculate_indicators(
+        closes
+    )
 
     return {
         "symbol": symbol,
         "current_price": current_price,
         "move_5m": move_5m,
         "volume_ratio": volume_ratio,
+        "ema20": indicators["ema20"],
+        "ema50": indicators["ema50"],
+        "rsi": indicators["rsi"],
     }
 
 
@@ -121,11 +183,15 @@ def scan_market():
     results = []
 
     print(
-        f"거래대금 상위 {len(top_symbols)}개 분석 중...\n",
+        f"거래대금 상위 "
+        f"{len(top_symbols)}개 분석 중...\n",
         flush=True,
     )
 
-    for index, item in enumerate(top_symbols, start=1):
+    for index, item in enumerate(
+        top_symbols,
+        start=1,
+    ):
         symbol = item["symbol"]
 
         try:
@@ -135,11 +201,20 @@ def scan_market():
                 result["price_change_24h"] = (
                     item["price_change_24h"]
                 )
+
                 results.append(result)
+
+                trend = (
+                    "상승"
+                    if result["ema20"] > result["ema50"]
+                    else "하락"
+                )
 
                 print(
                     f"{index:>2}/{len(top_symbols)} "
-                    f"{symbol} 분석 완료",
+                    f"{symbol:<12} "
+                    f"{trend} | "
+                    f"RSI {result['rsi']:.1f}",
                     flush=True,
                 )
 
@@ -166,53 +241,41 @@ def print_rankings(results):
         key=lambda item: item["move_5m"],
     )
 
-    volume_surge = sorted(
-        results,
-        key=lambda item: item["volume_ratio"],
-        reverse=True,
-    )
-
     print("\n최근 5분 상승률 상위")
-    print("-" * 55)
+    print("-" * 75)
 
-    for index, item in enumerate(rising[:5], start=1):
+    for item in rising[:5]:
         print(
-            f"{index}. {item['symbol']:<12} "
+            f"{item['symbol']:<12} "
             f"{item['move_5m']:+.3f}% | "
-            f"거래량 {item['volume_ratio']:.2f}배"
+            f"거래량 {item['volume_ratio']:.2f}배 | "
+            f"RSI {item['rsi']:.1f}"
         )
 
     print("\n최근 5분 하락률 상위")
-    print("-" * 55)
+    print("-" * 75)
 
-    for index, item in enumerate(falling[:5], start=1):
+    for item in falling[:5]:
         print(
-            f"{index}. {item['symbol']:<12} "
+            f"{item['symbol']:<12} "
             f"{item['move_5m']:+.3f}% | "
-            f"거래량 {item['volume_ratio']:.2f}배"
-        )
-
-    print("\n거래량 급증 상위")
-    print("-" * 55)
-
-    for index, item in enumerate(
-        volume_surge[:5],
-        start=1,
-    ):
-        print(
-            f"{index}. {item['symbol']:<12} "
             f"거래량 {item['volume_ratio']:.2f}배 | "
-            f"5분 {item['move_5m']:+.3f}%"
+            f"RSI {item['rsi']:.1f}"
         )
 
 
 if __name__ == "__main__":
-    from strategy import rank_candidates, print_candidates
+    from strategy import (
+        print_candidates,
+        rank_candidates,
+    )
 
     market_results = scan_market()
 
     print_rankings(market_results)
 
-    candidates = rank_candidates(market_results)
+    candidates = rank_candidates(
+        market_results
+    )
 
     print_candidates(candidates)
