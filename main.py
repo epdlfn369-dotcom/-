@@ -1,8 +1,14 @@
-import config
-print("불러온 config 위치:", config.__file__)
 import time
 
 import config
+from bot_status import (
+    mark_error,
+    mark_heartbeat,
+    mark_scan_completed,
+    mark_scan_started,
+    mark_started,
+    mark_stopped,
+)
 from position import (
     balance,
     positions,
@@ -19,100 +25,207 @@ from scanner import scan_market
 from strategy import rank_candidates
 
 
-def main():
-    print("=" * 60)
+POSITION_CHECK_SECONDS = 5
+
+
+def print_startup_information():
+    print("=" * 70)
     print(config.BOT_NAME)
-    print("=" * 60)
+    print("=" * 70)
 
     print("현재 모드: 가상매매")
-    print(f"저장된 가상잔고: {balance:,.0f}원")
-    print(f"복구된 포지션: {len(positions)}개")
-    print(f"최대 포지션: {config.MAX_POSITIONS}개")
-    print(f"손절: -{config.STOP_LOSS_PERCENT}%")
-    print(f"익절: +{config.TAKE_PROFIT_PERCENT}%")
+    print(
+        f"저장된 가상잔고: "
+        f"{balance:,.0f}원"
+    )
+    print(
+        f"복구된 포지션: "
+        f"{len(positions)}개"
+    )
+    print(
+        f"최대 포지션: "
+        f"{config.MAX_POSITIONS}개"
+    )
+    print(
+        f"포지션당 투입 비율: "
+        f"{config.POSITION_SIZE_PERCENT}%"
+    )
+    print(
+        f"최소 진입 점수: "
+        f"{config.MINIMUM_ENTRY_SCORE}점"
+    )
+    print(
+        f"손절: "
+        f"-{config.STOP_LOSS_PERCENT}%"
+    )
+    print(
+        f"익절: "
+        f"+{config.TAKE_PROFIT_PERCENT}%"
+    )
     print(
         f"왕복 수수료 가정: "
         f"{config.ROUND_TRIP_FEE_PERCENT}%"
     )
     print(
-        f"일일 손실 제한: "
-        f"-{config.DAILY_STOP_LOSS_PERCENT}%"
-    )
-    print(
-        f"일일 수익 제한: "
-        f"+{config.DAILY_TAKE_PROFIT_PERCENT}%"
+        f"스캔 주기: "
+        f"{config.SCAN_INTERVAL_SECONDS}초"
     )
     print("종료: Ctrl + C")
 
-    print_report()
-    print_daily_risk_status()
 
-    while True:
-        try:
-            # 기존 포지션은 거래 중단 상태여도 계속 감시
-            monitor_positions()
+def wait_until_next_scan():
+    checks = max(
+        1,
+        config.SCAN_INTERVAL_SECONDS
+        // POSITION_CHECK_SECONDS,
+    )
 
-            trading_status = get_trading_status()
+    for check_number in range(
+        checks
+    ):
+        monitor_positions()
 
-            if trading_status["can_trade"]:
-                print()
-                print("시장 스캔을 시작합니다.")
+        mark_heartbeat(
+            message=(
+                "포지션 감시 중 "
+                f"({check_number + 1}/{checks})"
+            )
+        )
 
-                market_results = scan_market()
+        time.sleep(
+            POSITION_CHECK_SECONDS
+        )
 
-                candidates = rank_candidates(
-                    market_results
-                )
 
-                if candidates:
-                    print()
-                    print("가상 진입 후보")
+def run_market_scan():
+    trading_status = (
+        get_trading_status()
+    )
 
-                    for candidate in candidates[:5]:
-                        print(
-                            f"{candidate['symbol']:<12} "
-                            f"{candidate['side']:<5} "
-                            f"{candidate['score']}점"
-                        )
+    if not trading_status[
+        "can_trade"
+    ]:
+        print()
+        print("⛔ 신규 시장 진입 중단")
+        print(
+            trading_status["reason"]
+        )
+        print(
+            f"오늘 실현손익: "
+            f"{trading_status['profit_amount']:+,.0f}원"
+        )
 
-                    open_top_candidates(candidates)
+        mark_heartbeat(
+            message=(
+                "일일 제한으로 "
+                "신규 진입 중단"
+            )
+        )
 
-                else:
-                    print(
-                        "현재 진입 조건을 만족하는 "
-                        "후보가 없습니다."
-                    )
+        return
 
-            else:
-                print()
-                print("⛔ 신규 시장 진입 중단")
-                print(trading_status["reason"])
-                print(
-                    f"오늘 실현손익: "
-                    f"{trading_status['profit_amount']:+,.0f}원"
-                )
+    print()
+    print("시장 스캔을 시작합니다.")
 
-            print_account_status()
-            print_daily_risk_status()
+    mark_scan_started()
 
-            checks = max(
-                1,
-                config.SCAN_INTERVAL_SECONDS // 5,
+    market_results = scan_market()
+
+    candidates = rank_candidates(
+        market_results
+    )
+
+    if candidates:
+        print()
+        print("가상 진입 후보")
+
+        for candidate in candidates[
+            :5
+        ]:
+            print(
+                f"{candidate['symbol']:<14} "
+                f"{candidate['side']:<5} "
+                f"{candidate['score']}점"
             )
 
-            for _ in range(checks):
+        open_top_candidates(
+            candidates
+        )
+
+    else:
+        print(
+            "현재 진입 조건을 만족하는 "
+            "후보가 없습니다."
+        )
+
+    mark_scan_completed()
+
+
+def main():
+    mark_started()
+
+    try:
+        print_startup_information()
+
+        print_report()
+        print_daily_risk_status()
+
+        while True:
+            try:
+                mark_heartbeat(
+                    "포지션 확인 시작"
+                )
+
                 monitor_positions()
-                time.sleep(5)
 
-        except KeyboardInterrupt:
-            print("\n프로그램을 종료합니다.")
-            print_report()
-            print_daily_risk_status()
-            break
+                run_market_scan()
 
-        except Exception as error:
-            print(f"오류 발생: {repr(error)}")
-            time.sleep(10)
+                print_account_status()
+                print_daily_risk_status()
+
+                wait_until_next_scan()
+
+            except KeyboardInterrupt:
+                raise
+
+            except Exception as error:
+                print(
+                    f"오류 발생: "
+                    f"{repr(error)}"
+                )
+
+                mark_error(error)
+
+                time.sleep(10)
+
+    except KeyboardInterrupt:
+        print()
+        print("프로그램을 종료합니다.")
+
+        mark_stopped(
+            "사용자가 Ctrl + C로 종료"
+        )
+
+        print_report()
+        print_daily_risk_status()
+
+    except Exception as error:
+        mark_error(error)
+
+        mark_stopped(
+            "치명적 오류로 봇 종료"
+        )
+
+        raise
+
+    finally:
+        current_status_message = (
+            "프로그램 실행 종료"
+        )
+
+        mark_stopped(
+            current_status_message
+        )
 
 
 if __name__ == "__main__":
