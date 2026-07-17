@@ -1,10 +1,10 @@
 {
   "running": true,
-  "started_at": "2026-07-17 18:05:52",
+  "started_at": "2026-07-17 18:12:44",
   "stopped_at": "",
-  "last_heartbeat": "2026-07-17 18:07:02",
-  "last_scan_started": "2026-07-17 18:06:58",
-  "last_scan_completed": "2026-07-17 18:07:01",
+  "last_heartbeat": "2026-07-17 18:13:19",
+  "last_scan_started": "2026-07-17 18:12:44",
+  "last_scan_completed": "2026-07-17 18:12:48",
   "last_error": "",
-  "message": "포지션 감시 중 (1/12)"
+  "message": "포지션 감시 중 (7/12)"
 }

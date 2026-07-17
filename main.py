@@ -1,6 +1,10 @@
 import time
 
 import config
+from bot_control import (
+    is_trading_enabled,
+    load_control,
+)
 from bot_status import (
     mark_error,
     mark_heartbeat,
@@ -34,42 +38,58 @@ def print_startup_information():
     print("=" * 70)
 
     print("현재 모드: 가상매매")
+
     print(
         f"저장된 가상잔고: "
         f"{balance:,.0f}원"
     )
+
     print(
         f"복구된 포지션: "
         f"{len(positions)}개"
     )
+
     print(
         f"최대 포지션: "
         f"{config.MAX_POSITIONS}개"
     )
+
     print(
         f"포지션당 투입 비율: "
         f"{config.POSITION_SIZE_PERCENT}%"
     )
+
     print(
         f"최소 진입 점수: "
         f"{config.MINIMUM_ENTRY_SCORE}점"
     )
+
     print(
         f"손절: "
         f"-{config.STOP_LOSS_PERCENT}%"
     )
+
     print(
         f"익절: "
         f"+{config.TAKE_PROFIT_PERCENT}%"
     )
-    print(
-        f"왕복 수수료 가정: "
-        f"{config.ROUND_TRIP_FEE_PERCENT}%"
-    )
+
     print(
         f"스캔 주기: "
         f"{config.SCAN_INTERVAL_SECONDS}초"
     )
+
+    control = load_control()
+
+    print(
+        "신규 진입 상태: "
+        + (
+            "활성화"
+            if control["trading_enabled"]
+            else "일시정지"
+        )
+    )
+
     print("종료: Ctrl + C")
 
 
@@ -80,9 +100,7 @@ def wait_until_next_scan():
         // POSITION_CHECK_SECONDS,
     )
 
-    for check_number in range(
-        checks
-    ):
+    for check_number in range(checks):
         monitor_positions()
 
         mark_heartbeat(
@@ -98,28 +116,54 @@ def wait_until_next_scan():
 
 
 def run_market_scan():
+    if not is_trading_enabled():
+        control = load_control()
+
+        print()
+        print(
+            "⏸ 신규 포지션 진입이 "
+            "일시정지 상태입니다."
+        )
+
+        reason = control.get(
+            "reason",
+            "",
+        )
+
+        if reason:
+            print(
+                f"정지 사유: {reason}"
+            )
+
+        print(
+            "기존 포지션의 손절·익절 감시는 "
+            "계속 진행합니다."
+        )
+
+        mark_heartbeat(
+            "사용자 설정으로 신규 진입 일시정지"
+        )
+
+        return
+
     trading_status = (
         get_trading_status()
     )
 
-    if not trading_status[
-        "can_trade"
-    ]:
+    if not trading_status["can_trade"]:
         print()
         print("⛔ 신규 시장 진입 중단")
         print(
             trading_status["reason"]
         )
+
         print(
             f"오늘 실현손익: "
             f"{trading_status['profit_amount']:+,.0f}원"
         )
 
         mark_heartbeat(
-            message=(
-                "일일 제한으로 "
-                "신규 진입 중단"
-            )
+            "일일 제한으로 신규 진입 중단"
         )
 
         return
@@ -139,9 +183,7 @@ def run_market_scan():
         print()
         print("가상 진입 후보")
 
-        for candidate in candidates[
-            :5
-        ]:
+        for candidate in candidates[:5]:
             print(
                 f"{candidate['symbol']:<14} "
                 f"{candidate['side']:<5} "
@@ -219,12 +261,8 @@ def main():
         raise
 
     finally:
-        current_status_message = (
-            "프로그램 실행 종료"
-        )
-
         mark_stopped(
-            current_status_message
+            "프로그램 실행 종료"
         )
 
 
