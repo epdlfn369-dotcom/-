@@ -21,7 +21,6 @@ balance, positions = load_state(
 # ==================================================
 # 공통 계산
 # ==================================================
-
 def clamp(
     value,
     minimum,
@@ -54,7 +53,8 @@ def calculate_exit_percentages(
 
     if atr_percent <= 0:
         print(
-            "ATR 값이 없어 고정 손절·익절을 사용합니다."
+            "ATR 값이 없어 "
+            "고정 손절·익절을 사용합니다."
         )
 
         return (
@@ -156,14 +156,20 @@ def calculate_gross_profit_percent(
 
     if side == "LONG":
         return (
-            (current_price - entry_price)
+            (
+                current_price
+                - entry_price
+            )
             / entry_price
             * 100
         )
 
     if side == "SHORT":
         return (
-            (entry_price - current_price)
+            (
+                entry_price
+                - current_price
+            )
             / entry_price
             * 100
         )
@@ -189,9 +195,108 @@ def calculate_net_profit_percent(
 
 
 # ==================================================
+# 보유시간 계산
+# ==================================================
+def parse_opened_at(
+    opened_at,
+):
+    if isinstance(
+        opened_at,
+        datetime,
+    ):
+        return opened_at
+
+    if isinstance(
+        opened_at,
+        str,
+    ):
+        cleaned_value = opened_at.strip()
+
+        if cleaned_value.endswith("Z"):
+            cleaned_value = (
+                cleaned_value[:-1]
+                + "+00:00"
+            )
+
+        try:
+            parsed_datetime = (
+                datetime.fromisoformat(
+                    cleaned_value
+                )
+            )
+
+            if (
+                parsed_datetime.tzinfo
+                is not None
+            ):
+                parsed_datetime = (
+                    parsed_datetime.astimezone()
+                    .replace(
+                        tzinfo=None
+                    )
+                )
+
+            return parsed_datetime
+
+        except ValueError:
+            return None
+
+    return None
+
+
+def get_holding_minutes(
+    position_data,
+):
+    opened_at = parse_opened_at(
+        position_data.get(
+            "opened_at"
+        )
+    )
+
+    if opened_at is None:
+        return None
+
+    elapsed = (
+        datetime.now()
+        - opened_at
+    )
+
+    return max(
+        0.0,
+        elapsed.total_seconds() / 60,
+    )
+
+
+def format_holding_time(
+    holding_minutes,
+):
+    if holding_minutes is None:
+        return "시간정보 없음"
+
+    total_minutes = int(
+        holding_minutes
+    )
+
+    hours = (
+        total_minutes // 60
+    )
+
+    minutes = (
+        total_minutes % 60
+    )
+
+    if hours > 0:
+        return (
+            f"{hours}시간 "
+            f"{minutes}분"
+        )
+
+    return f"{minutes}분"
+
+
+# ==================================================
 # 기존 저장 포지션 호환
 # ==================================================
-
 def ensure_position_data(
     symbol,
     position_data,
@@ -254,11 +359,16 @@ def ensure_position_data(
 
         changed = True
 
-    if "original_stop_price" not in position_data:
+    if (
+        "original_stop_price"
+        not in position_data
+    ):
         position_data[
             "original_stop_price"
         ] = float(
-            position_data["stop_price"]
+            position_data[
+                "stop_price"
+            ]
         )
 
         changed = True
@@ -284,10 +394,31 @@ def ensure_position_data(
 
         changed = True
 
-    if "trailing_stop_price" not in position_data:
+    if (
+        "trailing_stop_price"
+        not in position_data
+    ):
         position_data[
             "trailing_stop_price"
         ] = 0.0
+
+        changed = True
+
+    opened_at = parse_opened_at(
+        position_data.get(
+            "opened_at"
+        )
+    )
+
+    if opened_at is None:
+        position_data[
+            "opened_at"
+        ] = datetime.now().isoformat()
+
+        print(
+            f"{symbol}: 진입시간 정보가 없어 "
+            "현재 시각으로 복구했습니다."
+        )
 
         changed = True
 
@@ -300,7 +431,6 @@ def ensure_position_data(
 # ==================================================
 # 트레일링 스톱
 # ==================================================
-
 def update_trailing_stop(
     position_data,
     current_price,
@@ -334,9 +464,10 @@ def update_trailing_stop(
         ] = True
 
         print(
-            f"🔥 {position_data['symbol']} "
+            f"{position_data['symbol']} "
             f"트레일링 스톱 활성화 "
-            f"(수익률 {gross_percent:+.3f}%)"
+            f"(수익률 "
+            f"{gross_percent:+.3f}%)"
         )
 
         changed = True
@@ -358,7 +489,10 @@ def update_trailing_stop(
             current_price,
         )
 
-        if new_highest != previous_highest:
+        if (
+            new_highest
+            != previous_highest
+        ):
             position_data[
                 "highest_price"
             ] = new_highest
@@ -367,11 +501,16 @@ def update_trailing_stop(
 
         trailing_stop_price = (
             new_highest
-            * (1 - distance)
+            * (
+                1
+                - distance
+            )
         )
 
         current_stop_price = float(
-            position_data["stop_price"]
+            position_data[
+                "stop_price"
+            ]
         )
 
         # 롱은 손절선이 위로만 이동
@@ -380,7 +519,10 @@ def update_trailing_stop(
             trailing_stop_price,
         )
 
-        if new_stop_price > current_stop_price:
+        if (
+            new_stop_price
+            > current_stop_price
+        ):
             position_data[
                 "stop_price"
             ] = new_stop_price
@@ -409,7 +551,10 @@ def update_trailing_stop(
             current_price,
         )
 
-        if new_lowest != previous_lowest:
+        if (
+            new_lowest
+            != previous_lowest
+        ):
             position_data[
                 "lowest_price"
             ] = new_lowest
@@ -418,11 +563,16 @@ def update_trailing_stop(
 
         trailing_stop_price = (
             new_lowest
-            * (1 + distance)
+            * (
+                1
+                + distance
+            )
         )
 
         current_stop_price = float(
-            position_data["stop_price"]
+            position_data[
+                "stop_price"
+            ]
         )
 
         # 숏은 손절선이 아래로만 이동
@@ -431,7 +581,10 @@ def update_trailing_stop(
             trailing_stop_price,
         )
 
-        if new_stop_price < current_stop_price:
+        if (
+            new_stop_price
+            < current_stop_price
+        ):
             position_data[
                 "stop_price"
             ] = new_stop_price
@@ -454,8 +607,9 @@ def update_trailing_stop(
 # ==================================================
 # 진입
 # ==================================================
-
-def open_position(candidate):
+def open_position(
+    candidate,
+):
     global balance
 
     trading_status = (
@@ -467,6 +621,7 @@ def open_position(candidate):
             "신규 진입 중단: "
             f"{trading_status['reason']}"
         )
+
         return False
 
     symbol = candidate["symbol"]
@@ -476,6 +631,7 @@ def open_position(candidate):
         print(
             f"{symbol}: 이미 보유 중"
         )
+
         return False
 
     if is_in_cooldown(symbol):
@@ -487,7 +643,9 @@ def open_position(candidate):
 
         print(
             f"{symbol}: 재진입 대기 중 "
-            f"({format_remaining_time(remaining_seconds)})"
+            f"("
+            f"{format_remaining_time(remaining_seconds)}"
+            f")"
         )
 
         return False
@@ -500,6 +658,7 @@ def open_position(candidate):
             "최대 포지션 개수에 "
             "도달했습니다."
         )
+
         return False
 
     current_price = float(
@@ -543,35 +702,27 @@ def open_position(candidate):
             "reasons",
             [],
         ),
-
         "atr": float(
             candidate.get(
                 "atr",
                 0,
             )
         ),
-
         "atr_percent": float(
             candidate.get(
                 "atr_percent",
                 0,
             )
         ),
-
         "exit_mode": config.EXIT_MODE,
-
         "stop_percent": stop_percent,
-
         "take_profit_percent": (
             take_profit_percent
         ),
-
         "stop_price": stop_price,
-
         "original_stop_price": (
             stop_price
         ),
-
         "target_price": target_price,
 
         # 트레일링 데이터
@@ -580,7 +731,10 @@ def open_position(candidate):
         "highest_price": current_price,
         "lowest_price": current_price,
 
-        "opened_at": datetime.now(),
+        # ISO 문자열로 저장해 JSON 호환성 유지
+        "opened_at": (
+            datetime.now().isoformat()
+        ),
     }
 
     save_state(
@@ -589,7 +743,7 @@ def open_position(candidate):
     )
 
     print()
-    print("🚀 가상 포지션 진입")
+    print("가상 포지션 진입")
     print(f"종목: {symbol}")
     print(f"방향: {side}")
 
@@ -636,12 +790,21 @@ def open_position(candidate):
     if config.TRAILING_STOP_ENABLED:
         print(
             f"트레일링 시작: "
-            f"+{config.TRAILING_ACTIVATION_PERCENT}%"
+            f"+"
+            f"{config.TRAILING_ACTIVATION_PERCENT}"
+            f"%"
         )
 
         print(
             f"트레일링 거리: "
-            f"{config.TRAILING_DISTANCE_PERCENT}%"
+            f"{config.TRAILING_DISTANCE_PERCENT}"
+            f"%"
+        )
+
+    if config.MAX_HOLDING_MINUTES > 0:
+        print(
+            f"최대 보유시간: "
+            f"{config.MAX_HOLDING_MINUTES}분"
         )
 
     reasons = candidate.get(
@@ -663,7 +826,6 @@ def open_position(candidate):
 # ==================================================
 # 청산
 # ==================================================
-
 def close_position(
     symbol,
     current_price,
@@ -672,7 +834,7 @@ def close_position(
     global balance
 
     if symbol not in positions:
-        return
+        return False
 
     position_data = positions[
         symbol
@@ -694,7 +856,9 @@ def close_position(
 
     profit_amount = (
         float(
-            position_data["investment"]
+            position_data[
+                "investment"
+            ]
         )
         * net_percent
         / 100
@@ -703,7 +867,7 @@ def close_position(
     balance += profit_amount
 
     print()
-    print("💰 가상 포지션 청산")
+    print("가상 포지션 청산")
     print(f"종목: {symbol}")
 
     print(
@@ -713,7 +877,7 @@ def close_position(
 
     print(
         f"진입가: "
-        f"{position_data['entry_price']:,.8f}"
+        f"{float(position_data['entry_price']):,.8f}"
     )
 
     print(
@@ -770,7 +934,9 @@ def close_position(
         positions,
     )
 
-    start_cooldown(symbol)
+    start_cooldown(
+        symbol
+    )
 
     print(
         f"{symbol} 재진입 대기 시작"
@@ -778,16 +944,18 @@ def close_position(
 
     print()
 
+    return True
+
 
 # ==================================================
 # 포지션 감시
 # ==================================================
-
 def monitor_positions():
     if not positions:
         print(
             "현재 보유 포지션 없음"
         )
+
         return
 
     state_changed = False
@@ -796,6 +964,10 @@ def monitor_positions():
         positions.keys()
     ):
         try:
+            # 앞 포지션 청산 등의 이유로 이미 삭제됐으면 건너뜀
+            if symbol not in positions:
+                continue
+
             position_data = positions[
                 symbol
             ]
@@ -859,6 +1031,18 @@ def monitor_positions():
                 ]
             )
 
+            holding_minutes = (
+                get_holding_minutes(
+                    position_data
+                )
+            )
+
+            holding_text = (
+                format_holding_time(
+                    holding_minutes
+                )
+            )
+
             trailing_text = (
                 "ON"
                 if position_data[
@@ -871,17 +1055,27 @@ def monitor_positions():
                 f"[보유] {symbol:<14} "
                 f"{position_data['side']:<5} | "
                 f"현재 {current_price:,.8f} | "
-                f"{net_percent:+.3f}% | "
+                f"{gross_percent:+.3f}% | "
+                f"수수료후 {net_percent:+.3f}% | "
                 f"{unrealized_profit:+,.0f}원 | "
                 f"SL {stop_price:,.8f} | "
                 f"TP {target_price:,.8f} | "
-                f"TRAIL {trailing_text}"
+                f"TRAIL {trailing_text} | "
+                f"보유 {holding_text}"
             )
 
-            side = position_data["side"]
+            side = position_data[
+                "side"
+            ]
 
+            # ------------------------------------------
+            # 1순위: 손절 및 트레일링 스톱
+            # ------------------------------------------
             if side == "LONG":
-                if current_price <= stop_price:
+                if (
+                    current_price
+                    <= stop_price
+                ):
                     if position_data[
                         "trailing_active"
                     ]:
@@ -892,7 +1086,9 @@ def monitor_positions():
                     else:
                         reason = (
                             "손절 "
-                            f"-{position_data['stop_percent']:.3f}%"
+                            f"-"
+                            f"{position_data['stop_percent']:.3f}"
+                            f"%"
                         )
 
                     close_position(
@@ -901,18 +1097,13 @@ def monitor_positions():
                         reason=reason,
                     )
 
-                elif current_price >= target_price:
-                    close_position(
-                        symbol=symbol,
-                        current_price=current_price,
-                        reason=(
-                            "익절 "
-                            f"+{position_data['take_profit_percent']:.3f}%"
-                        ),
-                    )
+                    continue
 
             elif side == "SHORT":
-                if current_price >= stop_price:
+                if (
+                    current_price
+                    >= stop_price
+                ):
                     if position_data[
                         "trailing_active"
                     ]:
@@ -923,7 +1114,9 @@ def monitor_positions():
                     else:
                         reason = (
                             "손절 "
-                            f"-{position_data['stop_percent']:.3f}%"
+                            f"-"
+                            f"{position_data['stop_percent']:.3f}"
+                            f"%"
                         )
 
                     close_position(
@@ -932,15 +1125,69 @@ def monitor_positions():
                         reason=reason,
                     )
 
-                elif current_price <= target_price:
+                    continue
+
+            # ------------------------------------------
+            # 2순위: 익절
+            # ------------------------------------------
+            if side == "LONG":
+                if (
+                    current_price
+                    >= target_price
+                ):
                     close_position(
                         symbol=symbol,
                         current_price=current_price,
                         reason=(
                             "익절 "
-                            f"+{position_data['take_profit_percent']:.3f}%"
+                            f"+"
+                            f"{position_data['take_profit_percent']:.3f}"
+                            f"%"
                         ),
                     )
+
+                    continue
+
+            elif side == "SHORT":
+                if (
+                    current_price
+                    <= target_price
+                ):
+                    close_position(
+                        symbol=symbol,
+                        current_price=current_price,
+                        reason=(
+                            "익절 "
+                            f"+"
+                            f"{position_data['take_profit_percent']:.3f}"
+                            f"%"
+                        ),
+                    )
+
+                    continue
+
+            # ------------------------------------------
+            # 3순위: 최대 보유시간 초과
+            # ------------------------------------------
+            if (
+                config.MAX_HOLDING_MINUTES > 0
+                and holding_minutes
+                is not None
+                and holding_minutes
+                >= config.MAX_HOLDING_MINUTES
+            ):
+                close_position(
+                    symbol=symbol,
+                    current_price=current_price,
+                    reason=(
+                        "최대 보유시간 초과 "
+                        f"("
+                        f"{config.MAX_HOLDING_MINUTES}분"
+                        f")"
+                    ),
+                )
+
+                continue
 
         except Exception as error:
             print(
@@ -958,7 +1205,6 @@ def monitor_positions():
 # ==================================================
 # 후보 진입
 # ==================================================
-
 def open_top_candidates(
     candidates,
 ):
@@ -1005,7 +1251,8 @@ def open_top_candidates(
 
     if opened_count == 0:
         print(
-            "새롭게 진입한 포지션이 없습니다."
+            "새롭게 진입한 포지션이 "
+            "없습니다."
         )
 
     else:
@@ -1017,7 +1264,7 @@ def open_top_candidates(
 
 def print_account_status():
     print()
-    print("=" * 95)
+    print("=" * 115)
 
     print(
         f"가상잔고: "
@@ -1030,9 +1277,7 @@ def print_account_status():
         f"{config.MAX_POSITIONS}"
     )
 
-    for symbol, data in (
-        positions.items()
-    ):
+    for symbol, data in positions.items():
         trailing_text = (
             "ON"
             if data.get(
@@ -1042,16 +1287,29 @@ def print_account_status():
             else "OFF"
         )
 
+        holding_minutes = (
+            get_holding_minutes(
+                data
+            )
+        )
+
+        holding_text = (
+            format_holding_time(
+                holding_minutes
+            )
+        )
+
         print(
             f"- {symbol:<14} "
             f"{data['side']:<5} | "
             f"진입 "
-            f"{data['entry_price']:,.8f} | "
+            f"{float(data['entry_price']):,.8f} | "
             f"SL "
-            f"{data.get('stop_price', 0):,.8f} | "
+            f"{float(data.get('stop_price', 0)):,.8f} | "
             f"TP "
-            f"{data.get('target_price', 0):,.8f} | "
-            f"TRAIL {trailing_text}"
+            f"{float(data.get('target_price', 0)):,.8f} | "
+            f"TRAIL {trailing_text} | "
+            f"보유 {holding_text}"
         )
 
-    print("=" * 95)
+    print("=" * 115)

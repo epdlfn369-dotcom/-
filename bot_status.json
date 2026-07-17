@@ -1,10 +1,10 @@
 {
-  "running": true,
+  "running": false,
   "started_at": "2026-07-17 19:01:18",
-  "stopped_at": "",
-  "last_heartbeat": "2026-07-17 19:07:49",
-  "last_scan_started": "2026-07-17 19:06:48",
-  "last_scan_completed": "2026-07-17 19:06:52",
+  "stopped_at": "2026-07-17 19:27:34",
+  "last_heartbeat": "2026-07-17 19:27:34",
+  "last_scan_started": "2026-07-17 19:26:36",
+  "last_scan_completed": "2026-07-17 19:26:40",
   "last_error": "",
-  "message": "포지션 감시 중 (12/12)"
+  "message": "프로그램 실행 종료"
 }
