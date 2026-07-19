@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import ADXIndicator, EMAIndicator
 from ta.volatility import AverageTrueRange
 
 import config
@@ -327,6 +327,13 @@ def calculate_indicators(
         window=14,
     ).average_true_range()
 
+    dataframe["adx"] = ADXIndicator(
+        high=dataframe["high"],
+        low=dataframe["low"],
+        close=dataframe["close"],
+        window=14,
+    ).adx()
+
     latest = dataframe.iloc[-1]
 
     close_price = float(
@@ -358,6 +365,9 @@ def calculate_indicators(
         ),
         "atr": atr_value,
         "atr_percent": atr_percent,
+        "adx": float(
+            latest["adx"]
+        ),
     }
 
 
@@ -433,6 +443,7 @@ def analyze_symbol(symbol):
         "atr_percent": (
             indicators["atr_percent"]
         ),
+        "adx": indicators["adx"],
     }
 
 
@@ -456,6 +467,25 @@ def passes_recent_volume_filter(
     return (
         volume_ratio
         >= config.MINIMUM_VOLUME_RATIO
+    )
+
+
+def passes_adx_filter(
+    result,
+):
+    if not config.ADX_FILTER_ENABLED:
+        return True
+
+    adx = float(
+        result.get(
+            "adx",
+            0,
+        )
+    )
+
+    return (
+        adx
+        >= config.MINIMUM_ADX
     )
 
 
@@ -494,6 +524,21 @@ def scan_market():
             f"{config.MINIMUM_VOLUME_RATIO:.2f}배"
         )
 
+    print(
+        "ADX 필터: "
+        + (
+            "활성화"
+            if config.ADX_FILTER_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if config.ADX_FILTER_ENABLED:
+        print(
+            f"최소 ADX: "
+            f"{config.MINIMUM_ADX:.1f}"
+        )
+
     top_symbols = (
         get_top_volume_symbols()
     )
@@ -501,6 +546,7 @@ def scan_market():
     results = []
 
     excluded_recent_volume = 0
+    excluded_adx = 0
 
     print()
 
@@ -548,6 +594,24 @@ def scan_market():
 
                 continue
 
+            if not passes_adx_filter(
+                result
+            ):
+                excluded_adx += 1
+
+                print(
+                    f"{index:>2}/"
+                    f"{len(top_symbols)} "
+                    f"{symbol:<14} "
+                    f"ADX 부족 제외 | "
+                    f"{result['adx']:.1f} "
+                    f"< "
+                    f"{config.MINIMUM_ADX:.1f}",
+                    flush=True,
+                )
+
+                continue
+
             results.append(result)
 
             trend = (
@@ -569,7 +633,9 @@ def scan_market():
                 f"RSI "
                 f"{result['rsi']:.1f} | "
                 f"ATR "
-                f"{result['atr_percent']:.3f}%",
+                f"{result['atr_percent']:.3f}% | "
+                f"ADX "
+                f"{result['adx']:.1f}",
                 flush=True,
             )
 
@@ -594,6 +660,12 @@ def scan_market():
         print(
             "최종 전략 분석 대상: "
             f"{len(results)}개"
+        )
+
+    if config.ADX_FILTER_ENABLED:
+        print(
+            "ADX 부족 제외: "
+            f"{excluded_adx}개"
         )
 
     return results
@@ -627,7 +699,8 @@ def print_rankings(results):
             f"{item['volume_ratio']:.2f}배 | "
             f"RSI {item['rsi']:.1f} | "
             f"ATR "
-            f"{item['atr_percent']:.3f}%"
+            f"{item['atr_percent']:.3f}% | "
+            f"ADX {item['adx']:.1f}"
         )
 
     print()
@@ -642,7 +715,8 @@ def print_rankings(results):
             f"{item['volume_ratio']:.2f}배 | "
             f"RSI {item['rsi']:.1f} | "
             f"ATR "
-            f"{item['atr_percent']:.3f}%"
+            f"{item['atr_percent']:.3f}% | "
+            f"ADX {item['adx']:.1f}"
         )
 
 

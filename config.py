@@ -53,6 +53,12 @@ DEFAULT_SETTINGS = {
     "move_stop_to_breakeven": True,
 
     # ==================================================
+    # ADX 필터
+    # ==================================================
+    "adx_filter_enabled": True,
+    "minimum_adx": 20.0,
+
+    # ==================================================
     # 거래량 필터
     # ==================================================
     "volume_filter_enabled": True,
@@ -260,6 +266,21 @@ MOVE_STOP_TO_BREAKEVEN = bool(
 
 
 # ==================================================
+# ADX 필터
+# ==================================================
+ADX_FILTER_ENABLED = bool(
+    SETTINGS["adx_filter_enabled"]
+)
+
+MINIMUM_ADX = max(
+    0.0,
+    float(
+        SETTINGS["minimum_adx"]
+    ),
+)
+
+
+# ==================================================
 # 거래량 필터
 # ==================================================
 VOLUME_FILTER_ENABLED = bool(
@@ -454,6 +475,22 @@ def print_loaded_settings():
                 if MOVE_STOP_TO_BREAKEVEN
                 else "비활성화"
             )
+        )
+
+    print()
+    print(
+        "ADX 필터: "
+        + (
+            "활성화"
+            if ADX_FILTER_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if ADX_FILTER_ENABLED:
+        print(
+            f"최소 ADX: "
+            f"{MINIMUM_ADX:.1f}"
         )
 
     print()
