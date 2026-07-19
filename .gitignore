@@ -1,19 +1,10 @@
-# Python
 __pycache__/
 *.py[cod]
-
-# Logs
 logs/
-
-# Runtime
 runner.lock
 cooldown.json
 bot_status.json
 state.json
-
-# IDE
 .vscode/
-
-# OS
 Thumbs.db
 .DS_Store
