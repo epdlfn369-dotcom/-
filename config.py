@@ -59,6 +59,16 @@ DEFAULT_SETTINGS = {
     "minimum_adx": 20.0,
 
     # ==================================================
+    # 상위 시간봉 추세 필터
+    # ==================================================
+    "higher_timeframe_filter_enabled": True,
+    "higher_timeframe_interval": "1h",
+    "higher_timeframe_minimum_adx": 30.0,
+
+    # 동시에 진입할 최상위 후보 수
+    "top_candidate_limit": 1,
+
+    # ==================================================
     # 거래량 필터
     # ==================================================
     "volume_filter_enabled": True,
@@ -281,6 +291,32 @@ MINIMUM_ADX = max(
 
 
 # ==================================================
+# 상위 시간봉 추세 필터
+# ==================================================
+HIGHER_TIMEFRAME_FILTER_ENABLED = bool(
+    SETTINGS["higher_timeframe_filter_enabled"]
+)
+
+HIGHER_TIMEFRAME_INTERVAL = str(
+    SETTINGS["higher_timeframe_interval"]
+).strip()
+
+HIGHER_TIMEFRAME_MINIMUM_ADX = max(
+    0.0,
+    float(
+        SETTINGS["higher_timeframe_minimum_adx"]
+    ),
+)
+
+TOP_CANDIDATE_LIMIT = max(
+    1,
+    int(
+        SETTINGS["top_candidate_limit"]
+    ),
+)
+
+
+# ==================================================
 # 거래량 필터
 # ==================================================
 VOLUME_FILTER_ENABLED = bool(
@@ -492,6 +528,31 @@ def print_loaded_settings():
             f"최소 ADX: "
             f"{MINIMUM_ADX:.1f}"
         )
+
+    print()
+    print(
+        "1시간 추세 필터: "
+        + (
+            "활성화"
+            if HIGHER_TIMEFRAME_FILTER_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if HIGHER_TIMEFRAME_FILTER_ENABLED:
+        print(
+            f"상위 시간봉: "
+            f"{HIGHER_TIMEFRAME_INTERVAL}"
+        )
+        print(
+            f"상위 시간봉 최소 ADX: "
+            f"{HIGHER_TIMEFRAME_MINIMUM_ADX:.1f}"
+        )
+
+    print(
+        f"동시 진입 후보: TOP"
+        f"{TOP_CANDIDATE_LIMIT}"
+    )
 
     print()
     print(

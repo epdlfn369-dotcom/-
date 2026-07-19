@@ -232,12 +232,13 @@ def get_top_volume_symbols():
 def get_closed_candles(
     symbol,
     limit=120,
+    interval="1m",
 ):
     candles = request_json(
         "/fapi/v1/klines",
         {
             "symbol": symbol,
-            "interval": "1m",
+            "interval": interval,
             "limit": limit,
         },
     )
@@ -371,6 +372,63 @@ def calculate_indicators(
     }
 
 
+
+def calculate_higher_timeframe_indicators(
+    symbol,
+):
+    candles = get_closed_candles(
+        symbol=symbol,
+        limit=120,
+        interval=(
+            config.HIGHER_TIMEFRAME_INTERVAL
+        ),
+    )
+
+    if len(candles) < 60:
+        return None
+
+    highs = [
+        float(candle[2])
+        for candle in candles
+    ]
+
+    lows = [
+        float(candle[3])
+        for candle in candles
+    ]
+
+    closes = [
+        float(candle[4])
+        for candle in candles
+    ]
+
+    indicators = calculate_indicators(
+        highs,
+        lows,
+        closes,
+    )
+
+    if (
+        indicators["ema20"]
+        > indicators["ema50"]
+    ):
+        side = "LONG"
+    elif (
+        indicators["ema20"]
+        < indicators["ema50"]
+    ):
+        side = "SHORT"
+    else:
+        side = "NONE"
+
+    return {
+        "side": side,
+        "ema20": indicators["ema20"],
+        "ema50": indicators["ema50"],
+        "adx": indicators["adx"],
+    }
+
+
 # ==================================================
 # 개별 종목 분석
 # ==================================================
@@ -431,6 +489,15 @@ def analyze_symbol(symbol):
         )
     )
 
+    higher_timeframe = (
+        calculate_higher_timeframe_indicators(
+            symbol
+        )
+    )
+
+    if higher_timeframe is None:
+        return None
+
     return {
         "symbol": symbol,
         "current_price": current_price,
@@ -444,6 +511,18 @@ def analyze_symbol(symbol):
             indicators["atr_percent"]
         ),
         "adx": indicators["adx"],
+        "higher_timeframe_side": (
+            higher_timeframe["side"]
+        ),
+        "higher_timeframe_adx": (
+            higher_timeframe["adx"]
+        ),
+        "higher_timeframe_ema20": (
+            higher_timeframe["ema20"]
+        ),
+        "higher_timeframe_ema50": (
+            higher_timeframe["ema50"]
+        ),
     }
 
 
@@ -486,6 +565,54 @@ def passes_adx_filter(
     return (
         adx
         >= config.MINIMUM_ADX
+    )
+
+
+
+def passes_higher_timeframe_filter(
+    result,
+):
+    if not config.HIGHER_TIMEFRAME_FILTER_ENABLED:
+        return True
+
+    higher_side = result.get(
+        "higher_timeframe_side",
+        "NONE",
+    )
+
+    higher_adx = float(
+        result.get(
+            "higher_timeframe_adx",
+            0,
+        )
+    )
+
+    ema20 = float(
+        result.get(
+            "ema20",
+            0,
+        )
+    )
+
+    ema50 = float(
+        result.get(
+            "ema50",
+            0,
+        )
+    )
+
+    if ema20 > ema50:
+        current_side = "LONG"
+    elif ema20 < ema50:
+        current_side = "SHORT"
+    else:
+        current_side = "NONE"
+
+    return (
+        current_side != "NONE"
+        and current_side == higher_side
+        and higher_adx
+        >= config.HIGHER_TIMEFRAME_MINIMUM_ADX
     )
 
 
@@ -539,6 +666,21 @@ def scan_market():
             f"{config.MINIMUM_ADX:.1f}"
         )
 
+    print(
+        "1시간 추세 필터: "
+        + (
+            "활성화"
+            if config.HIGHER_TIMEFRAME_FILTER_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if config.HIGHER_TIMEFRAME_FILTER_ENABLED:
+        print(
+            f"1시간 최소 ADX: "
+            f"{config.HIGHER_TIMEFRAME_MINIMUM_ADX:.1f}"
+        )
+
     top_symbols = (
         get_top_volume_symbols()
     )
@@ -547,6 +689,7 @@ def scan_market():
 
     excluded_recent_volume = 0
     excluded_adx = 0
+    excluded_higher_timeframe = 0
 
     print()
 
@@ -612,6 +755,25 @@ def scan_market():
 
                 continue
 
+            if not passes_higher_timeframe_filter(
+                result
+            ):
+                excluded_higher_timeframe += 1
+
+                print(
+                    f"{index:>2}/"
+                    f"{len(top_symbols)} "
+                    f"{symbol:<14} "
+                    f"1시간 추세 제외 | "
+                    f"방향 "
+                    f"{result['higher_timeframe_side']} | "
+                    f"ADX "
+                    f"{result['higher_timeframe_adx']:.1f}",
+                    flush=True,
+                )
+
+                continue
+
             results.append(result)
 
             trend = (
@@ -635,7 +797,11 @@ def scan_market():
                 f"ATR "
                 f"{result['atr_percent']:.3f}% | "
                 f"ADX "
-                f"{result['adx']:.1f}",
+                f"{result['adx']:.1f} | "
+                f"1H "
+                f"{result['higher_timeframe_side']} "
+                f"ADX "
+                f"{result['higher_timeframe_adx']:.1f}",
                 flush=True,
             )
 
@@ -666,6 +832,12 @@ def scan_market():
         print(
             "ADX 부족 제외: "
             f"{excluded_adx}개"
+        )
+
+    if config.HIGHER_TIMEFRAME_FILTER_ENABLED:
+        print(
+            "1시간 추세·ADX 제외: "
+            f"{excluded_higher_timeframe}개"
         )
 
     return results

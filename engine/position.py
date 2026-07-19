@@ -1480,9 +1480,12 @@ def open_top_candidates(
 
         return
 
-    available_slots = (
-        config.MAX_POSITIONS
-        - len(positions)
+    available_slots = min(
+        config.TOP_CANDIDATE_LIMIT,
+        (
+            config.MAX_POSITIONS
+            - len(positions)
+        ),
     )
 
     if available_slots <= 0:
