@@ -24,5 +24,9 @@
   "top_volume_symbols": 20,
   "daily_stop_loss_percent": 5.0,
   "daily_take_profit_percent": 10.0,
-  "strategy_profile": "conservative"
+  "strategy_profile": "conservative",
+  "partial_take_profit_enabled": true,
+  "partial_trigger_percent": 1.5,
+  "partial_close_ratio": 0.5,
+  "move_stop_to_breakeven": true
 }

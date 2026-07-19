@@ -8,7 +8,7 @@ from cooldown import (
     is_in_cooldown,
     start_cooldown,
 )
-from risk import get_trading_status
+from engine.risk import get_trading_status
 from storage import load_state, save_state
 from trade_logger import save_trade
 
@@ -387,6 +387,41 @@ def ensure_position_data(
 
         changed = True
 
+    if "partial_taken" not in position_data:
+        position_data["partial_taken"] = False
+        changed = True
+
+    if "partial_trigger_price" not in position_data:
+        direction = (
+            1
+            if side == "LONG"
+            else -1
+        )
+
+        position_data[
+            "partial_trigger_price"
+        ] = (
+            entry_price
+            * (
+                1
+                + direction
+                * config.PARTIAL_TRIGGER_PERCENT
+                / 100
+            )
+        )
+
+        changed = True
+
+    if "partial_close_ratio" not in position_data:
+        position_data[
+            "partial_close_ratio"
+        ] = config.PARTIAL_CLOSE_RATIO
+        changed = True
+
+    if "partial_profit_amount" not in position_data:
+        position_data["partial_profit_amount"] = 0.0
+        changed = True
+
     if "trailing_active" not in position_data:
         position_data[
             "trailing_active"
@@ -725,6 +760,28 @@ def open_position(
         ),
         "target_price": target_price,
 
+        # 부분익절 데이터
+        "partial_taken": False,
+        "partial_trigger_price": (
+            current_price
+            * (
+                1
+                + (
+                    config.PARTIAL_TRIGGER_PERCENT
+                    / 100
+                )
+                * (
+                    1
+                    if side == "LONG"
+                    else -1
+                )
+            )
+        ),
+        "partial_close_ratio": (
+            config.PARTIAL_CLOSE_RATIO
+        ),
+        "partial_profit_amount": 0.0,
+
         # 트레일링 데이터
         "trailing_active": False,
         "trailing_stop_price": 0.0,
@@ -787,6 +844,22 @@ def open_position(
         f"{target_price:,.8f}"
     )
 
+    if config.PARTIAL_TAKE_PROFIT_ENABLED:
+        print(
+            f"부분익절: "
+            f"+{config.PARTIAL_TRIGGER_PERCENT}%에서 "
+            f"{config.PARTIAL_CLOSE_RATIO * 100:.0f}%"
+        )
+
+        print(
+            "부분익절 후 본절 이동: "
+            + (
+                "ON"
+                if config.MOVE_STOP_TO_BREAKEVEN
+                else "OFF"
+            )
+        )
+
     if config.TRAILING_STOP_ENABLED:
         print(
             f"트레일링 시작: "
@@ -816,6 +889,143 @@ def open_position(
         print(
             "진입 이유: "
             + ", ".join(reasons)
+        )
+
+    print()
+
+    return True
+
+
+# ==================================================
+# 부분익절
+# ==================================================
+def execute_partial_take_profit(
+    symbol,
+    current_price,
+):
+    global balance
+
+    if symbol not in positions:
+        return False
+
+    position_data = positions[symbol]
+
+    if position_data.get(
+        "partial_taken",
+        False,
+    ):
+        return False
+
+    close_ratio = float(
+        position_data.get(
+            "partial_close_ratio",
+            config.PARTIAL_CLOSE_RATIO,
+        )
+    )
+
+    remaining_investment = float(
+        position_data["investment"]
+    )
+
+    closed_investment = (
+        remaining_investment
+        * close_ratio
+    )
+
+    if closed_investment <= 0:
+        return False
+
+    gross_percent = (
+        calculate_gross_profit_percent(
+            position_data,
+            current_price,
+        )
+    )
+
+    net_percent = (
+        gross_percent
+        - config.ROUND_TRIP_FEE_PERCENT
+    )
+
+    profit_amount = (
+        closed_investment
+        * net_percent
+        / 100
+    )
+
+    balance += profit_amount
+
+    position_data["investment"] = (
+        remaining_investment
+        - closed_investment
+    )
+
+    position_data["partial_taken"] = True
+    position_data["partial_profit_amount"] = (
+        float(
+            position_data.get(
+                "partial_profit_amount",
+                0.0,
+            )
+        )
+        + profit_amount
+    )
+
+    if config.MOVE_STOP_TO_BREAKEVEN:
+        position_data["stop_price"] = float(
+            position_data["entry_price"]
+        )
+
+    positions[symbol] = position_data
+
+    save_trade(
+        symbol=symbol,
+        side=position_data["side"],
+        entry_price=position_data[
+            "entry_price"
+        ],
+        exit_price=current_price,
+        investment=closed_investment,
+        profit_percent=net_percent,
+        profit_amount=profit_amount,
+        reason=(
+            "부분익절 "
+            f"{close_ratio * 100:.0f}%"
+        ),
+        opened_at=position_data[
+            "opened_at"
+        ],
+    )
+
+    save_state(
+        balance,
+        positions,
+    )
+
+    print()
+    print("가상 부분익절")
+    print(f"종목: {symbol}")
+    print(
+        f"청산 비율: "
+        f"{close_ratio * 100:.0f}%"
+    )
+    print(
+        f"부분익절 가격: "
+        f"{current_price:,.8f}"
+    )
+    print(
+        f"부분 실현손익: "
+        f"{profit_amount:+,.0f}원"
+    )
+    print(
+        f"남은 투입금: "
+        f"{position_data['investment']:,.0f}원"
+    )
+
+    if config.MOVE_STOP_TO_BREAKEVEN:
+        print(
+            f"손절가를 본절로 이동: "
+            f"{position_data['stop_price']:,.8f}"
         )
 
     print()
@@ -1128,7 +1338,53 @@ def monitor_positions():
                     continue
 
             # ------------------------------------------
-            # 2순위: 익절
+            # 2순위: 부분익절 + 본절 이동
+            # ------------------------------------------
+            if (
+                config.PARTIAL_TAKE_PROFIT_ENABLED
+                and not position_data.get(
+                    "partial_taken",
+                    False,
+                )
+            ):
+                partial_trigger_price = float(
+                    position_data[
+                        "partial_trigger_price"
+                    ]
+                )
+
+                if side == "LONG":
+                    partial_reached = (
+                        current_price
+                        >= partial_trigger_price
+                    )
+                else:
+                    partial_reached = (
+                        current_price
+                        <= partial_trigger_price
+                    )
+
+                if partial_reached:
+                    execute_partial_take_profit(
+                        symbol=symbol,
+                        current_price=current_price,
+                    )
+
+                    if symbol not in positions:
+                        continue
+
+                    position_data = positions[
+                        symbol
+                    ]
+
+                    stop_price = float(
+                        position_data[
+                            "stop_price"
+                        ]
+                    )
+
+            # ------------------------------------------
+            # 3순위: 익절
             # ------------------------------------------
             if side == "LONG":
                 if (
@@ -1167,7 +1423,7 @@ def monitor_positions():
                     continue
 
             # ------------------------------------------
-            # 3순위: 최대 보유시간 초과
+            # 4순위: 최대 보유시간 초과
             # ------------------------------------------
             if (
                 config.MAX_HOLDING_MINUTES > 0
@@ -1287,6 +1543,15 @@ def print_account_status():
             else "OFF"
         )
 
+        partial_text = (
+            "DONE"
+            if data.get(
+                "partial_taken",
+                False,
+            )
+            else "WAIT"
+        )
+
         holding_minutes = (
             get_holding_minutes(
                 data
@@ -1309,6 +1574,7 @@ def print_account_status():
             f"TP "
             f"{float(data.get('target_price', 0)):,.8f} | "
             f"TRAIL {trailing_text} | "
+            f"PARTIAL {partial_text} | "
             f"보유 {holding_text}"
         )
 

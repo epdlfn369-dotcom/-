@@ -45,6 +45,14 @@ DEFAULT_SETTINGS = {
     "max_holding_minutes": 240,
 
     # ==================================================
+    # 부분익절 + 본절 이동
+    # ==================================================
+    "partial_take_profit_enabled": True,
+    "partial_trigger_percent": 1.5,
+    "partial_close_ratio": 0.5,
+    "move_stop_to_breakeven": True,
+
+    # ==================================================
     # 거래량 필터
     # ==================================================
     "volume_filter_enabled": True,
@@ -223,6 +231,35 @@ MAX_HOLDING_MINUTES = max(
 
 
 # ==================================================
+# 부분익절 + 본절 이동
+# ==================================================
+PARTIAL_TAKE_PROFIT_ENABLED = bool(
+    SETTINGS["partial_take_profit_enabled"]
+)
+
+PARTIAL_TRIGGER_PERCENT = max(
+    0.0,
+    float(
+        SETTINGS["partial_trigger_percent"]
+    ),
+)
+
+PARTIAL_CLOSE_RATIO = min(
+    0.95,
+    max(
+        0.05,
+        float(
+            SETTINGS["partial_close_ratio"]
+        ),
+    ),
+)
+
+MOVE_STOP_TO_BREAKEVEN = bool(
+    SETTINGS["move_stop_to_breakeven"]
+)
+
+
+# ==================================================
 # 거래량 필터
 # ==================================================
 VOLUME_FILTER_ENABLED = bool(
@@ -389,6 +426,34 @@ def print_loaded_settings():
     else:
         print(
             "최대 보유시간 청산: 비활성화"
+        )
+
+    print()
+    print(
+        "부분익절: "
+        + (
+            "활성화"
+            if PARTIAL_TAKE_PROFIT_ENABLED
+            else "비활성화"
+        )
+    )
+
+    if PARTIAL_TAKE_PROFIT_ENABLED:
+        print(
+            f"부분익절 시작: "
+            f"+{PARTIAL_TRIGGER_PERCENT}%"
+        )
+        print(
+            f"부분익절 비율: "
+            f"{PARTIAL_CLOSE_RATIO * 100:.0f}%"
+        )
+        print(
+            "부분익절 후 본절 이동: "
+            + (
+                "활성화"
+                if MOVE_STOP_TO_BREAKEVEN
+                else "비활성화"
+            )
         )
 
     print()

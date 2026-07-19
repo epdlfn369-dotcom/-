@@ -4,8 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import ADXIndicator, EMAIndicator
+from ta.volatility import AverageTrueRange
 
+import config
 from binance_api import request_json
 import engine.strategy as strategy_engine
 from engine.strategy_profiles import PROFILES, get_strategy_profile
@@ -19,16 +21,24 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 BACKTEST_DAYS = 30
 
-STARTING_BALANCE = 1_000_000
-POSITION_SIZE_PERCENT = 10
+STARTING_BALANCE = config.STARTING_BALANCE
+POSITION_SIZE_PERCENT = config.POSITION_SIZE_PERCENT
 
-STOP_LOSS_PERCENT = 1.0
-TAKE_PROFIT_PERCENT = 3.0
-ROUND_TRIP_FEE_PERCENT = 0.10
+STOP_LOSS_PERCENT = config.STOP_LOSS_PERCENT
+TAKE_PROFIT_PERCENT = config.TAKE_PROFIT_PERCENT
+ROUND_TRIP_FEE_PERCENT = config.ROUND_TRIP_FEE_PERCENT
+
+ACTIVE_EXIT_MODE = config.EXIT_MODE
+
+PARTIAL_TAKE_PROFIT_ENABLED = False
+PARTIAL_TRIGGER_PERCENT = 1.5
+PARTIAL_CLOSE_RATIO = 0.5
+MOVE_STOP_TO_BREAKEVEN = True
 
 EMA_FAST = 20
 EMA_SLOW = 50
 RSI_PERIOD = 14
+ATR_PERIOD = 14
 
 REQUEST_DELAY_SECONDS = 0.15
 
@@ -236,6 +246,19 @@ def add_indicators(dataframe):
         window=RSI_PERIOD,
     ).rsi()
 
+    dataframe["atr"] = AverageTrueRange(
+        high=dataframe["high"],
+        low=dataframe["low"],
+        close=dataframe["close"],
+        window=ATR_PERIOD,
+    ).average_true_range()
+
+    dataframe["atr_percent"] = (
+        dataframe["atr"]
+        / dataframe["close"]
+        * 100
+    )
+
     momentum_bars = (
         get_momentum_lookback_bars()
     )
@@ -316,8 +339,12 @@ def build_strategy_item(row):
 
         # 현재 strategy.py에는 직접 사용되지 않지만,
         # 실거래 스캐너 결과 구조와 맞추기 위해 포함
-        "atr": 0.0,
-        "atr_percent": 0.0,
+        "atr": float(
+            row["atr"]
+        ),
+        "atr_percent": float(
+            row["atr_percent"]
+        ),
     }
 
 
@@ -337,16 +364,84 @@ def get_entry_result(row):
 # 손절·익절 가격
 # ==================================================
 
+def clamp(
+    value,
+    minimum,
+    maximum,
+):
+    return max(
+        minimum,
+        min(
+            value,
+            maximum,
+        ),
+    )
+
+
+def calculate_exit_percentages(
+    row,
+    exit_mode,
+):
+    normalized_mode = str(
+        exit_mode
+    ).upper()
+
+    if normalized_mode == "FIXED":
+        return (
+            STOP_LOSS_PERCENT,
+            TAKE_PROFIT_PERCENT,
+        )
+
+    atr_percent = float(
+        row["atr_percent"]
+    )
+
+    if atr_percent <= 0:
+        return (
+            STOP_LOSS_PERCENT,
+            TAKE_PROFIT_PERCENT,
+        )
+
+    stop_percent = (
+        atr_percent
+        * config.ATR_STOP_MULTIPLIER
+    )
+
+    take_profit_percent = (
+        atr_percent
+        * config.ATR_TAKE_PROFIT_MULTIPLIER
+    )
+
+    stop_percent = clamp(
+        stop_percent,
+        config.MINIMUM_STOP_PERCENT,
+        config.MAXIMUM_STOP_PERCENT,
+    )
+
+    take_profit_percent = clamp(
+        take_profit_percent,
+        config.MINIMUM_TAKE_PROFIT_PERCENT,
+        config.MAXIMUM_TAKE_PROFIT_PERCENT,
+    )
+
+    return (
+        stop_percent,
+        take_profit_percent,
+    )
+
+
 def calculate_exit_prices(
     side,
     entry_price,
+    stop_percent,
+    take_profit_percent,
 ):
     if side == "LONG":
         stop_price = (
             entry_price
             * (
                 1
-                - STOP_LOSS_PERCENT / 100
+                - stop_percent / 100
             )
         )
 
@@ -354,16 +449,16 @@ def calculate_exit_prices(
             entry_price
             * (
                 1
-                + TAKE_PROFIT_PERCENT / 100
+                + take_profit_percent / 100
             )
         )
 
-    else:
+    elif side == "SHORT":
         stop_price = (
             entry_price
             * (
                 1
-                + STOP_LOSS_PERCENT / 100
+                + stop_percent / 100
             )
         )
 
@@ -371,8 +466,13 @@ def calculate_exit_prices(
             entry_price
             * (
                 1
-                - TAKE_PROFIT_PERCENT / 100
+                - take_profit_percent / 100
             )
+        )
+
+    else:
+        raise ValueError(
+            f"지원하지 않는 방향: {side}"
         )
 
     return (
@@ -406,11 +506,76 @@ def calculate_gross_profit_percent(
     )
 
 
+def calculate_position_result(
+    position,
+    final_exit_price,
+):
+    remaining_ratio = float(
+        position.get(
+            "remaining_ratio",
+            1.0,
+        )
+    )
+
+    partial_gross_percent = float(
+        position.get(
+            "partial_gross_percent",
+            0.0,
+        )
+    )
+
+    final_gross_percent = (
+        calculate_gross_profit_percent(
+            position["side"],
+            position["entry_price"],
+            final_exit_price,
+        )
+    )
+
+    weighted_gross_percent = (
+        partial_gross_percent
+        + final_gross_percent
+        * remaining_ratio
+    )
+
+    net_percent = (
+        weighted_gross_percent
+        - ROUND_TRIP_FEE_PERCENT
+    )
+
+    profit_amount = (
+        position["investment"]
+        * net_percent
+        / 100
+    )
+
+    return (
+        weighted_gross_percent,
+        net_percent,
+        profit_amount,
+    )
+
+
 # ==================================================
 # 백테스트 실행
 # ==================================================
 
-def run_backtest(dataframe):
+def run_backtest(
+    dataframe,
+    exit_mode=None,
+    partial_exit_enabled=None,
+):
+    selected_exit_mode = (
+        exit_mode
+        or ACTIVE_EXIT_MODE
+    ).upper()
+
+    selected_partial_exit = (
+        PARTIAL_TAKE_PROFIT_ENABLED
+        if partial_exit_enabled is None
+        else bool(partial_exit_enabled)
+    )
+
     balance = float(
         STARTING_BALANCE
     )
@@ -507,27 +672,13 @@ def run_backtest(dataframe):
                     )
 
             if exit_price is not None:
-                gross_percent = (
-                    calculate_gross_profit_percent(
-                        side,
-                        position[
-                            "entry_price"
-                        ],
-                        exit_price,
-                    )
-                )
-
-                net_percent = (
-                    gross_percent
-                    - ROUND_TRIP_FEE_PERCENT
-                )
-
-                profit_amount = (
-                    position[
-                        "investment"
-                    ]
-                    * net_percent
-                    / 100
+                (
+                    gross_percent,
+                    net_percent,
+                    profit_amount,
+                ) = calculate_position_result(
+                    position,
+                    exit_price,
                 )
 
                 balance += profit_amount
@@ -562,6 +713,31 @@ def run_backtest(dataframe):
                         ),
                         "reason": (
                             exit_reason
+                        ),
+                        "exit_mode": (
+                            position[
+                                "exit_mode"
+                            ]
+                        ),
+                        "stop_percent": (
+                            position[
+                                "stop_percent"
+                            ]
+                        ),
+                        "take_profit_percent": (
+                            position[
+                                "take_profit_percent"
+                            ]
+                        ),
+                        "partial_exit_enabled": (
+                            position[
+                                "partial_exit_enabled"
+                            ]
+                        ),
+                        "partial_taken": (
+                            position[
+                                "partial_taken"
+                            ]
                         ),
                         "entry_score": (
                             position[
@@ -601,6 +777,160 @@ def run_backtest(dataframe):
                 # 재진입하지 않음
                 continue
 
+            # --------------------------------------
+            # 부분익절 + 본절 이동
+            # --------------------------------------
+            if (
+                selected_partial_exit
+                and not position[
+                    "partial_taken"
+                ]
+            ):
+                partial_price = position[
+                    "partial_price"
+                ]
+
+                if side == "LONG":
+                    partial_touched = (
+                        row["high"]
+                        >= partial_price
+                    )
+                else:
+                    partial_touched = (
+                        row["low"]
+                        <= partial_price
+                    )
+
+                if partial_touched:
+                    partial_gross = (
+                        calculate_gross_profit_percent(
+                            side,
+                            position[
+                                "entry_price"
+                            ],
+                            partial_price,
+                        )
+                    )
+
+                    close_ratio = (
+                        position[
+                            "partial_close_ratio"
+                        ]
+                    )
+
+                    position[
+                        "partial_gross_percent"
+                    ] = (
+                        partial_gross
+                        * close_ratio
+                    )
+
+                    position[
+                        "remaining_ratio"
+                    ] = (
+                        1.0
+                        - close_ratio
+                    )
+
+                    position[
+                        "partial_taken"
+                    ] = True
+
+                    if MOVE_STOP_TO_BREAKEVEN:
+                        position[
+                            "stop_price"
+                        ] = position[
+                            "entry_price"
+                        ]
+
+                    # 같은 봉에서 최종 익절까지 닿은 경우
+                    if side == "LONG":
+                        target_touched = (
+                            row["high"]
+                            >= target_price
+                        )
+                    else:
+                        target_touched = (
+                            row["low"]
+                            <= target_price
+                        )
+
+                    if target_touched:
+                        exit_price = (
+                            target_price
+                        )
+                        exit_reason = (
+                            "PARTIAL_AND_TAKE_PROFIT"
+                        )
+
+                        (
+                            gross_percent,
+                            net_percent,
+                            profit_amount,
+                        ) = calculate_position_result(
+                            position,
+                            exit_price,
+                        )
+
+                        balance += profit_amount
+
+                        trades.append(
+                            {
+                                "side": side,
+                                "entry_time": position[
+                                    "entry_time"
+                                ],
+                                "exit_time": row["time"],
+                                "entry_price": position[
+                                    "entry_price"
+                                ],
+                                "exit_price": exit_price,
+                                "gross_percent": gross_percent,
+                                "net_percent": net_percent,
+                                "profit_amount": profit_amount,
+                                "reason": exit_reason,
+                                "exit_mode": position[
+                                    "exit_mode"
+                                ],
+                                "stop_percent": position[
+                                    "stop_percent"
+                                ],
+                                "take_profit_percent": position[
+                                    "take_profit_percent"
+                                ],
+                                "partial_exit_enabled": True,
+                                "partial_taken": True,
+                                "entry_score": position[
+                                    "entry_score"
+                                ],
+                                "entry_reasons": position[
+                                    "entry_reasons"
+                                ],
+                            }
+                        )
+
+                        peak_balance = max(
+                            peak_balance,
+                            balance,
+                        )
+
+                        drawdown = (
+                            (
+                                peak_balance
+                                - balance
+                            )
+                            / peak_balance
+                            * 100
+                        )
+
+                        maximum_drawdown = max(
+                            maximum_drawdown,
+                            drawdown,
+                        )
+
+                        position = None
+                        continue
+
         # ------------------------------------------
         # 신규 진입
         # ------------------------------------------
@@ -628,11 +958,23 @@ def run_backtest(dataframe):
             )
 
             (
+                stop_percent,
+                take_profit_percent,
+            ) = calculate_exit_percentages(
+                row,
+                selected_exit_mode,
+            )
+
+            (
                 stop_price,
                 target_price,
             ) = calculate_exit_prices(
-                signal,
-                entry_price,
+                side=signal,
+                entry_price=entry_price,
+                stop_percent=stop_percent,
+                take_profit_percent=(
+                    take_profit_percent
+                ),
             )
 
             investment = (
@@ -655,6 +997,42 @@ def run_backtest(dataframe):
                 "target_price": (
                     target_price
                 ),
+                "exit_mode": (
+                    selected_exit_mode
+                ),
+                "stop_percent": (
+                    stop_percent
+                ),
+                "take_profit_percent": (
+                    take_profit_percent
+                ),
+                "partial_exit_enabled": (
+                    selected_partial_exit
+                ),
+                "partial_trigger_percent": (
+                    PARTIAL_TRIGGER_PERCENT
+                ),
+                "partial_close_ratio": (
+                    PARTIAL_CLOSE_RATIO
+                ),
+                "partial_price": (
+                    entry_price
+                    * (
+                        1
+                        + (
+                            PARTIAL_TRIGGER_PERCENT
+                            / 100
+                        )
+                        * (
+                            1
+                            if signal == "LONG"
+                            else -1
+                        )
+                    )
+                ),
+                "partial_taken": False,
+                "partial_gross_percent": 0.0,
+                "remaining_ratio": 1.0,
                 "investment": (
                     investment
                 ),
@@ -680,27 +1058,13 @@ def run_backtest(dataframe):
             last_row["close"]
         )
 
-        gross_percent = (
-            calculate_gross_profit_percent(
-                position["side"],
-                position[
-                    "entry_price"
-                ],
-                exit_price,
-            )
-        )
-
-        net_percent = (
-            gross_percent
-            - ROUND_TRIP_FEE_PERCENT
-        )
-
-        profit_amount = (
-            position[
-                "investment"
-            ]
-            * net_percent
-            / 100
+        (
+            gross_percent,
+            net_percent,
+            profit_amount,
+        ) = calculate_position_result(
+            position,
+            exit_price,
         )
 
         balance += profit_amount
@@ -738,6 +1102,31 @@ def run_backtest(dataframe):
                 "reason": (
                     "END_OF_DATA"
                 ),
+                "exit_mode": (
+                    position[
+                        "exit_mode"
+                    ]
+                ),
+                "stop_percent": (
+                    position[
+                        "stop_percent"
+                    ]
+                ),
+                "take_profit_percent": (
+                    position[
+                        "take_profit_percent"
+                    ]
+                ),
+                "partial_exit_enabled": (
+                    position[
+                        "partial_exit_enabled"
+                    ]
+                ),
+                "partial_taken": (
+                    position[
+                        "partial_taken"
+                    ]
+                ),
                 "entry_score": (
                     position[
                         "entry_score"
@@ -763,6 +1152,12 @@ def run_backtest(dataframe):
         ),
         "signal_count": (
             signal_count
+        ),
+        "exit_mode": (
+            selected_exit_mode
+        ),
+        "partial_exit_enabled": (
+            selected_partial_exit
         ),
         "trades": trades,
     }
@@ -995,6 +1390,20 @@ def print_report(
         "engine.strategy.calculate_score"
     )
     print(
+        f"청산 방식: "
+        f"{result['exit_mode']}"
+    )
+    print(
+        "부분익절: "
+        + (
+            "ON"
+            if result[
+                "partial_exit_enabled"
+            ]
+            else "OFF"
+        )
+    )
+    print(
         f"발생한 진입 신호: "
         f"{result['signal_count']}회"
     )
@@ -1137,6 +1546,33 @@ def print_report(
     print(
         f"평균 진입 점수: "
         f"{average_entry_score:.2f}점"
+    )
+
+    average_stop_percent = (
+        sum(
+            trade["stop_percent"]
+            for trade in trades
+        )
+        / total_trades
+    )
+
+    average_take_profit_percent = (
+        sum(
+            trade[
+                "take_profit_percent"
+            ]
+            for trade in trades
+        )
+        / total_trades
+    )
+
+    print(
+        f"평균 손절 폭: "
+        f"{average_stop_percent:.3f}%"
+    )
+    print(
+        f"평균 익절 폭: "
+        f"{average_take_profit_percent:.3f}%"
     )
     print()
 
@@ -1352,6 +1788,256 @@ def run_profile_comparison(
     )
 
 
+
+def summarize_exit_result(
+    exit_mode,
+    result,
+):
+    summary = summarize_result(
+        exit_mode,
+        result,
+    )
+
+    summary["exit_mode"] = exit_mode
+
+    trades = result["trades"]
+
+    summary["average_stop_percent"] = (
+        sum(
+            trade["stop_percent"]
+            for trade in trades
+        )
+        / len(trades)
+        if trades
+        else 0.0
+    )
+
+    summary[
+        "average_take_profit_percent"
+    ] = (
+        sum(
+            trade[
+                "take_profit_percent"
+            ]
+            for trade in trades
+        )
+        / len(trades)
+        if trades
+        else 0.0
+    )
+
+    return summary
+
+
+def print_exit_mode_comparison(
+    summaries,
+):
+    print()
+    print("=" * 104)
+    print("청산 방식 비교 결과")
+    print("=" * 104)
+
+    print(
+        f"{'방식':<12}"
+        f"{'거래수':>9}"
+        f"{'승률':>12}"
+        f"{'수익률':>14}"
+        f"{'MDD':>12}"
+        f"{'평균SL':>12}"
+        f"{'평균TP':>12}"
+        f"{'종료잔고':>16}"
+    )
+
+    print("-" * 104)
+
+    for summary in summaries:
+        print(
+            f"{summary['exit_mode']:<12}"
+            f"{summary['trades']:>9}"
+            f"{summary['win_rate']:>11.2f}%"
+            f"{summary['return_percent']:>+13.3f}%"
+            f"{summary['maximum_drawdown']:>11.3f}%"
+            f"{summary['average_stop_percent']:>11.3f}%"
+            f"{summary['average_take_profit_percent']:>11.3f}%"
+            f"{summary['ending_balance']:>15,.0f}원"
+        )
+
+    if summaries:
+        best = max(
+            summaries,
+            key=lambda item: item[
+                "return_percent"
+            ],
+        )
+
+        print("-" * 104)
+        print(
+            f"최고 수익률 청산 방식: "
+            f"{best['exit_mode']} "
+            f"({best['return_percent']:+.3f}%)"
+        )
+
+    print("=" * 104)
+
+
+def run_exit_mode_comparison(
+    dataframe,
+):
+    summaries = []
+
+    print()
+    print(
+        "동일한 진입 전략과 캔들로 "
+        "FIXED / ATR 청산을 비교합니다."
+    )
+
+    for exit_mode in (
+        "FIXED",
+        "ATR",
+    ):
+        print()
+        print(
+            f"[{exit_mode}] "
+            "백테스트 실행 중..."
+        )
+
+        result = run_backtest(
+            dataframe,
+            exit_mode=exit_mode,
+        )
+
+        summaries.append(
+            summarize_exit_result(
+                exit_mode,
+                result,
+            )
+        )
+
+    print_exit_mode_comparison(
+        summaries
+    )
+
+
+def summarize_partial_result(
+    label,
+    result,
+):
+    summary = summarize_result(
+        label,
+        result,
+    )
+
+    summary["label"] = label
+
+    trades = result["trades"]
+
+    summary["partial_count"] = sum(
+        1
+        for trade in trades
+        if trade.get(
+            "partial_taken",
+            False,
+        )
+    )
+
+    return summary
+
+
+def print_partial_comparison(
+    summaries,
+):
+    print()
+    print("=" * 96)
+    print("부분익절 + 본절 이동 비교 결과")
+    print("=" * 96)
+
+    print(
+        f"{'방식':<22}"
+        f"{'거래수':>9}"
+        f"{'부분익절':>11}"
+        f"{'승률':>12}"
+        f"{'수익률':>14}"
+        f"{'MDD':>12}"
+        f"{'종료잔고':>16}"
+    )
+
+    print("-" * 96)
+
+    for summary in summaries:
+        print(
+            f"{summary['label']:<22}"
+            f"{summary['trades']:>9}"
+            f"{summary['partial_count']:>11}"
+            f"{summary['win_rate']:>11.2f}%"
+            f"{summary['return_percent']:>+13.3f}%"
+            f"{summary['maximum_drawdown']:>11.3f}%"
+            f"{summary['ending_balance']:>15,.0f}원"
+        )
+
+    if summaries:
+        best = max(
+            summaries,
+            key=lambda item: item[
+                "return_percent"
+            ],
+        )
+
+        print("-" * 96)
+        print(
+            f"최고 수익률 방식: "
+            f"{best['label']} "
+            f"({best['return_percent']:+.3f}%)"
+        )
+
+    print("=" * 96)
+
+
+def run_partial_comparison(
+    dataframe,
+):
+    summaries = []
+
+    print()
+    print(
+        "conservative + FIXED 기준으로 "
+        "부분익절 효과를 비교합니다."
+    )
+
+    cases = [
+        (
+            "FULL_EXIT",
+            False,
+        ),
+        (
+            "PARTIAL_50_BREAKEVEN",
+            True,
+        ),
+    ]
+
+    for label, enabled in cases:
+        print()
+        print(
+            f"[{label}] "
+            "백테스트 실행 중..."
+        )
+
+        result = run_backtest(
+            dataframe,
+            exit_mode="FIXED",
+            partial_exit_enabled=enabled,
+        )
+
+        summaries.append(
+            summarize_partial_result(
+                label,
+                result,
+            )
+        )
+
+    print_partial_comparison(
+        summaries
+    )
+
 def prepare_dataframe():
     candles = (
         download_historical_candles()
@@ -1407,7 +2093,51 @@ def main():
         ),
     )
 
+
+    parser.add_argument(
+        "--compare-exits",
+        action="store_true",
+        help=(
+            "FIXED와 ATR 청산 방식 비교"
+        ),
+    )
+
+    parser.add_argument(
+        "--exit-mode",
+        choices=[
+            "FIXED",
+            "ATR",
+        ],
+        help=(
+            "단일 백테스트에 사용할 "
+            "청산 방식"
+        ),
+    )
+
+
+    parser.add_argument(
+        "--compare-partials",
+        action="store_true",
+        help=(
+            "전량익절과 부분익절+본절이동 비교"
+        ),
+    )
+
     args = parser.parse_args()
+
+    compare_flags = sum(
+        [
+            bool(args.compare),
+            bool(args.compare_exits),
+            bool(args.compare_partials),
+        ]
+    )
+
+    if compare_flags > 1:
+        parser.error(
+            "비교 옵션은 한 번에 하나만 "
+            "사용할 수 있습니다."
+        )
 
     try:
         dataframe = prepare_dataframe()
@@ -1432,8 +2162,27 @@ def main():
             f"{resolved_name}"
         )
 
+        if args.compare_exits:
+            run_exit_mode_comparison(
+                dataframe
+            )
+            return
+
+
+        if args.compare_partials:
+            run_partial_comparison(
+                dataframe
+            )
+            return
+
+        selected_exit_mode = (
+            args.exit_mode
+            or ACTIVE_EXIT_MODE
+        )
+
         result = run_backtest(
-            dataframe
+            dataframe,
+            exit_mode=selected_exit_mode,
         )
 
         print_report(
