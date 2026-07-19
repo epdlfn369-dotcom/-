@@ -64,6 +64,7 @@ DEFAULT_SETTINGS = {
     "minimum_entry_score": 45,
     "round_trip_fee_percent": 0.10,
     "top_volume_symbols": 20,
+    "strategy_profile": "balanced",
 
     # ==================================================
     # 일일 제한
@@ -274,6 +275,14 @@ TOP_VOLUME_SYMBOLS = max(
 )
 
 
+STRATEGY_PROFILE = str(
+    SETTINGS.get(
+        "strategy_profile",
+        "balanced",
+    )
+).strip().lower()
+
+
 # ==================================================
 # 일일 제한
 # ==================================================
@@ -419,6 +428,10 @@ def print_loaded_settings():
     print(
         f"스캔 주기: "
         f"{SCAN_INTERVAL_SECONDS}초"
+    )
+    print(
+        f"전략 프로필: "
+        f"{STRATEGY_PROFILE}"
     )
     print("=" * 70)
 

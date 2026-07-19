@@ -2,34 +2,27 @@
   "starting_balance": 1000000,
   "position_size_percent": 10.0,
   "max_positions": 3,
-
   "exit_mode": "FIXED",
-
   "stop_loss_percent": 1.0,
   "take_profit_percent": 3.0,
-
   "atr_stop_multiplier": 2.0,
   "atr_take_profit_multiplier": 6.0,
   "minimum_stop_percent": 0.5,
   "maximum_stop_percent": 2.0,
   "minimum_take_profit_percent": 1.5,
   "maximum_take_profit_percent": 6.0,
-
   "trailing_stop_enabled": true,
   "trailing_activation_percent": 1.0,
   "trailing_distance_percent": 0.5,
-
   "max_holding_minutes": 240,
-
   "volume_filter_enabled": true,
   "minimum_24h_quote_volume": 50000000,
   "minimum_volume_ratio": 0.8,
-
   "scan_interval_seconds": 60,
-  "minimum_entry_score": 45,
+  "minimum_entry_score": 65,
   "round_trip_fee_percent": 0.1,
   "top_volume_symbols": 20,
-
   "daily_stop_loss_percent": 5.0,
-  "daily_take_profit_percent": 10.0
+  "daily_take_profit_percent": 10.0,
+  "strategy_profile": "balanced"
 }
