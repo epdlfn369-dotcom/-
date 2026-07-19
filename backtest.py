@@ -1,3 +1,4 @@
+import argparse
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -6,7 +7,8 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 
 from binance_api import request_json
-from engine.strategy import calculate_score
+import engine.strategy as strategy_engine
+from engine.strategy_profiles import PROFILES, get_strategy_profile
 
 
 # ==================================================
@@ -326,7 +328,7 @@ def get_entry_result(row):
         )
     )
 
-    return calculate_score(
+    return strategy_engine.calculate_score(
         strategy_item
     )
 
@@ -796,6 +798,175 @@ def calculate_maximum_streak(
     return maximum
 
 
+
+def print_score_band_report(trades):
+    bands = [
+        (65, 69),
+        (70, 74),
+        (75, 79),
+        (80, 84),
+        (85, 89),
+        (90, 999),
+    ]
+
+    print()
+    print("진입 점수대별 성과")
+    print("-" * 72)
+
+    for minimum, maximum in bands:
+        band_trades = [
+            trade
+            for trade in trades
+            if minimum
+            <= trade["entry_score"]
+            <= maximum
+        ]
+
+        if not band_trades:
+            continue
+
+        wins = [
+            trade
+            for trade in band_trades
+            if trade["profit_amount"] > 0
+        ]
+
+        win_rate = (
+            len(wins)
+            / len(band_trades)
+            * 100
+        )
+
+        total_profit = sum(
+            trade["profit_amount"]
+            for trade in band_trades
+        )
+
+        average_percent = (
+            sum(
+                trade["net_percent"]
+                for trade in band_trades
+            )
+            / len(band_trades)
+        )
+
+        label = (
+            f"{minimum}+"
+            if maximum >= 999
+            else f"{minimum}-{maximum}"
+        )
+
+        print(
+            f"{label:>7}점 | "
+            f"{len(band_trades):>3}회 | "
+            f"승률 {win_rate:>6.2f}% | "
+            f"평균 {average_percent:+.3f}% | "
+            f"손익 {total_profit:+,.0f}원"
+        )
+
+
+def print_exit_reason_report(trades):
+    reasons = {}
+
+    for trade in trades:
+        reason = trade["reason"]
+
+        if reason not in reasons:
+            reasons[reason] = {
+                "count": 0,
+                "profit": 0.0,
+            }
+
+        reasons[reason]["count"] += 1
+        reasons[reason]["profit"] += (
+            trade["profit_amount"]
+        )
+
+    print()
+    print("청산 사유별 성과")
+    print("-" * 72)
+
+    for reason, data in sorted(
+        reasons.items()
+    ):
+        print(
+            f"{reason:<16} | "
+            f"{data['count']:>3}회 | "
+            f"{data['profit']:+,.0f}원"
+        )
+
+
+def print_reason_combination_report(trades):
+    combinations = {}
+
+    for trade in trades:
+        reasons = trade.get(
+            "entry_reasons",
+            [],
+        )
+
+        if reasons:
+            key = " + ".join(
+                sorted(reasons)
+            )
+        else:
+            key = "이유 없음"
+
+        if key not in combinations:
+            combinations[key] = {
+                "count": 0,
+                "wins": 0,
+                "profit": 0.0,
+                "percent_sum": 0.0,
+            }
+
+        combinations[key]["count"] += 1
+        combinations[key]["profit"] += float(
+            trade["profit_amount"]
+        )
+        combinations[key]["percent_sum"] += float(
+            trade["net_percent"]
+        )
+
+        if trade["profit_amount"] > 0:
+            combinations[key]["wins"] += 1
+
+    print()
+    print("진입 이유 조합별 성과")
+    print("-" * 95)
+
+    ranked = sorted(
+        combinations.items(),
+        key=lambda item: item[1]["profit"],
+        reverse=True,
+    )
+
+    for key, data in ranked:
+        count = data["count"]
+
+        win_rate = (
+            data["wins"]
+            / count
+            * 100
+            if count
+            else 0.0
+        )
+
+        average_percent = (
+            data["percent_sum"]
+            / count
+            if count
+            else 0.0
+        )
+
+        print(
+            f"{count:>3}회 | "
+            f"승률 {win_rate:>6.2f}% | "
+            f"평균 {average_percent:+.3f}% | "
+            f"손익 {data['profit']:+,.0f}원 | "
+            f"{key}"
+        )
+
 def print_report(
     result,
     dataframe,
@@ -996,6 +1167,10 @@ def print_report(
         f"{calculate_maximum_streak(trades, False)}회"
     )
 
+    print_score_band_report(trades)
+    print_exit_reason_report(trades)
+    print_reason_combination_report(trades)
+
     print()
     print("최근 거래 10건")
     print("-" * 72)
@@ -1031,31 +1206,230 @@ def print_report(
 
 
 # ==================================================
+# 프로필 비교
+# ==================================================
+
+def set_strategy_profile(profile_name):
+    resolved_name, profile = get_strategy_profile(
+        profile_name
+    )
+
+    strategy_engine.PROFILE_NAME = resolved_name
+    strategy_engine.PROFILE = profile
+
+    return resolved_name
+
+
+def summarize_result(
+    profile_name,
+    result,
+):
+    trades = result["trades"]
+    total_trades = len(trades)
+
+    wins = [
+        trade
+        for trade in trades
+        if trade["profit_amount"] > 0
+    ]
+
+    win_rate = (
+        len(wins)
+        / total_trades
+        * 100
+        if total_trades
+        else 0.0
+    )
+
+    total_return = (
+        (
+            result["ending_balance"]
+            - result["starting_balance"]
+        )
+        / result["starting_balance"]
+        * 100
+    )
+
+    return {
+        "profile": profile_name,
+        "trades": total_trades,
+        "wins": len(wins),
+        "win_rate": win_rate,
+        "return_percent": total_return,
+        "maximum_drawdown": (
+            result["maximum_drawdown"]
+        ),
+        "ending_balance": (
+            result["ending_balance"]
+        ),
+    }
+
+
+def print_profile_comparison(
+    summaries,
+):
+    print()
+    print("=" * 88)
+    print("전략 프로필 비교 결과")
+    print("=" * 88)
+
+    print(
+        f"{'프로필':<16}"
+        f"{'거래수':>10}"
+        f"{'승리':>8}"
+        f"{'승률':>12}"
+        f"{'수익률':>14}"
+        f"{'MDD':>12}"
+        f"{'종료잔고':>16}"
+    )
+
+    print("-" * 88)
+
+    for summary in summaries:
+        print(
+            f"{summary['profile']:<16}"
+            f"{summary['trades']:>10}"
+            f"{summary['wins']:>8}"
+            f"{summary['win_rate']:>11.2f}%"
+            f"{summary['return_percent']:>+13.3f}%"
+            f"{summary['maximum_drawdown']:>11.3f}%"
+            f"{summary['ending_balance']:>15,.0f}원"
+        )
+
+    if summaries:
+        best = max(
+            summaries,
+            key=lambda item: item[
+                "return_percent"
+            ],
+        )
+
+        print("-" * 88)
+        print(
+            f"최고 수익률 프로필: "
+            f"{best['profile']} "
+            f"({best['return_percent']:+.3f}%)"
+        )
+
+    print("=" * 88)
+
+
+def run_profile_comparison(
+    dataframe,
+):
+    summaries = []
+
+    print()
+    print(
+        "동일한 캔들 데이터로 "
+        "전략 프로필을 비교합니다."
+    )
+
+    for profile_name in PROFILES:
+        resolved_name = set_strategy_profile(
+            profile_name
+        )
+
+        print()
+        print(
+            f"[{resolved_name}] "
+            "백테스트 실행 중..."
+        )
+
+        result = run_backtest(
+            dataframe
+        )
+
+        summaries.append(
+            summarize_result(
+                resolved_name,
+                result,
+            )
+        )
+
+    print_profile_comparison(
+        summaries
+    )
+
+
+def prepare_dataframe():
+    candles = (
+        download_historical_candles()
+    )
+
+    dataframe = (
+        candles_to_dataframe(
+            candles
+        )
+    )
+
+    dataframe = (
+        add_indicators(
+            dataframe
+        )
+    )
+
+    print(
+        f"지표 계산 완료: "
+        f"{len(dataframe):,}개 봉",
+        flush=True,
+    )
+
+    return dataframe
+
+
+# ==================================================
 # 실행
 # ==================================================
 
 def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "BinanceBot 백테스트"
+        )
+    )
+
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "모든 전략 프로필을 "
+            "동일 데이터로 비교"
+        ),
+    )
+
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES.keys()),
+        help=(
+            "단일 백테스트에 사용할 "
+            "전략 프로필"
+        ),
+    )
+
+    args = parser.parse_args()
+
     try:
-        candles = (
-            download_historical_candles()
-        )
+        dataframe = prepare_dataframe()
 
-        dataframe = (
-            candles_to_dataframe(
-                candles
-            )
-        )
-
-        dataframe = (
-            add_indicators(
+        if args.compare:
+            run_profile_comparison(
                 dataframe
             )
+            return
+
+        selected_profile = (
+            args.profile
+            or strategy_engine.PROFILE_NAME
+        )
+
+        resolved_name = set_strategy_profile(
+            selected_profile
         )
 
         print(
-            f"지표 계산 완료: "
-            f"{len(dataframe):,}개 봉",
-            flush=True,
+            f"전략 프로필: "
+            f"{resolved_name}"
         )
 
         result = run_backtest(
