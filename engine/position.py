@@ -11,6 +11,9 @@ from cooldown import (
 from engine.risk import get_trading_status
 from storage import load_state, save_state
 from trade_logger import save_trade
+from entry_snapshot_logger import (
+    save_entry_snapshot,
+)
 
 
 balance, positions = load_state(
@@ -733,10 +736,51 @@ def open_position(
         "entry_price": current_price,
         "investment": investment,
         "score": candidate["score"],
+        "long_score": candidate.get(
+            "long_score",
+            0,
+        ),
+        "short_score": candidate.get(
+            "short_score",
+            0,
+        ),
         "reasons": candidate.get(
             "reasons",
             [],
         ),
+        "score_components": (
+            candidate.get(
+                "score_components",
+                {},
+            )
+        ),
+        "strategy_profile": (
+            candidate.get(
+                "strategy_profile",
+                "",
+            )
+        ),
+        "entry_snapshot": {
+            key: candidate.get(
+                key
+            )
+            for key in (
+                "move_5m",
+                "volume_ratio",
+                "price_change_24h",
+                "ema20",
+                "ema50",
+                "rsi",
+                "adx",
+                "atr",
+                "atr_percent",
+                "quote_volume",
+                "higher_timeframe_side",
+                "higher_timeframe_adx",
+                "higher_timeframe_ema20",
+                "higher_timeframe_ema50",
+            )
+        },
         "atr": float(
             candidate.get(
                 "atr",
@@ -797,6 +841,20 @@ def open_position(
     save_state(
         balance,
         positions,
+    )
+
+    snapshot_path = (
+        save_entry_snapshot(
+            candidate=candidate,
+            entry_price=current_price,
+            investment=investment,
+            stop_price=stop_price,
+            target_price=target_price,
+            stop_percent=stop_percent,
+            take_profit_percent=(
+                take_profit_percent
+            ),
+        )
     )
 
     print()
@@ -890,6 +948,28 @@ def open_position(
             "진입 이유: "
             + ", ".join(reasons)
         )
+
+    components = candidate.get(
+        "score_components",
+        {},
+    )
+
+    if components:
+        component_text = ", ".join(
+            f"{key} {value:+}"
+            for key, value
+            in components.items()
+        )
+
+        print(
+            "점수 구성: "
+            + component_text
+        )
+
+    print(
+        f"진입 스냅샷 저장: "
+        f"{snapshot_path.name}"
+    )
 
     print()
 
