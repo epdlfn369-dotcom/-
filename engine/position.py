@@ -14,6 +14,9 @@ from trade_logger import save_trade
 from entry_snapshot_logger import (
     save_entry_snapshot,
 )
+from candidate_history_logger import (
+    save_candidate_history,
+)
 
 
 balance, positions = load_state(
@@ -1575,6 +1578,22 @@ def open_top_candidates(
         )
 
         return
+
+    history_result = (
+        save_candidate_history(
+            candidates=candidates,
+            selected_limit=available_slots,
+            blocked_symbols=positions.keys(),
+        )
+    )
+
+    if history_result is not None:
+        print(
+            "후보 히스토리 저장: "
+            f"{history_result['candidate_count']}개 | "
+            f"선택 {history_result['selected_count']}개 | "
+            f"{history_result['path'].name}"
+        )
 
     opened_count = 0
 
